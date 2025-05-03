@@ -57,7 +57,7 @@ void InlineRegionOp::print(OpAsmPrinter &p) {
 LogicalResult InlineRegionOp::verify() {
   Block &block = getRegion().front();
   
-  // Verify block arguments match input types (unwrapped)
+  // Verify block arguments match input types
   if (block.getNumArguments() != getInputs().size())
     return emitOpError("expected block to have same number of arguments as inputs");
     

@@ -8,8 +8,14 @@
 extern "C" {
 #endif
 
-/// Manually register the inline dialect with a context.
 void inlineRegisterDialect(MlirContext ctx);
+
+MlirOperation inlineInlineRegionOpCreate(MlirLocation loc,
+                                         MlirValue* inputs, intptr_t numInputs,
+                                         MlirType* resultTypes, intptr_t numResults,
+                                         MlirRegion region);
+
+MlirOperation inlineYieldOpCreate(MlirLocation loc, MlirValue* results, intptr_t numResults);
 
 #ifdef __cplusplus
 }
