@@ -15,6 +15,15 @@ MlirOperation inlineInlineRegionOpCreate(MlirLocation loc,
                                          MlirType* resultTypes, intptr_t numResults,
                                          MlirRegion region);
 
+MlirOperation inlineInlineRegionOpParseFromSourceString(
+    MlirLocation loc,
+    MlirStringRef* operandNames,
+    MlirValue* operands,
+    intptr_t numInputs,
+    MlirStringRef sourceString,
+    char* errorMessageBuffer,
+    intptr_t errorMessageBufferCapacity);
+
 MlirOperation inlineYieldOpCreate(MlirLocation loc, MlirValue* results, intptr_t numResults);
 
 #ifdef __cplusplus

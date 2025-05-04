@@ -3,12 +3,14 @@
 
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/IR/OpAsmInterface.td"
 include "mlir/IR/OpBase.td"
 include "Dialect.td"
 
 def InlineRegionOp : InlineOp<"inline_region", [
   AutomaticAllocationScope,
   IsolatedFromAbove,
+  OpAsmOpInterface,
   SingleBlockImplicitTerminator<"YieldOp">
 ]> {
   let summary = "Runs a region with explicitly specified arguments and a return value";
@@ -16,10 +18,11 @@ def InlineRegionOp : InlineOp<"inline_region", [
   let description = [{
     The `inline.inline_region` operation takes a list of operands and executes a regionj
     with those operands bound to SSA values of the same name within the region.
+    referenced by their symbol name within the region.
 
     Example:
     ```mlir
-    %res = inline.inline_region %a, %b : (i32, i32)  -> i32 {
+    %res = inline.inline_region %a, %b : (i32, i32) -> i32 {
       %sum = arith.addi %a, %b : i32
       %two = arith.constant 2 : i32
       %scaled = arith.muli %sum, %two : i32
@@ -36,8 +39,21 @@ def InlineRegionOp : InlineOp<"inline_region", [
 
   let skipDefaultBuilders = 1;
   let builders = [
-    OpBuilder<(ins "mlir::ValueRange":$inputs, "mlir::TypeRange":$resultTypes)>
+    OpBuilder<(ins "mlir::ValueRange":$inputs, "mlir::TypeRange":$resultTypes)>,
   ];
+
+  let extraClassDeclaration = [{
+    mlir::LogicalResult addParsedRegionBody(llvm::ArrayRef<llvm::StringRef> inputNames,
+                                            llvm::StringRef regionStr);
+
+    //===------------------------------------------------------------------===//
+    // OpAsmOpInterface Methods
+    //===------------------------------------------------------------------===//
+
+    /// Allow the dialect prefix to be omitted.
+    static StringRef getDefaultDialect() { return "inline"; }
+  }];
+
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 }

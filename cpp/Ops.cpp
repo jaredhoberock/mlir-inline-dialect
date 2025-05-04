@@ -1,13 +1,14 @@
 #include "Dialect.hpp"
 #include "Ops.hpp"
 #include <mlir/IR/Builders.h>
+#include <mlir/IR/Verifier.h>
+#include <mlir/Parser/Parser.h>
 #include <iostream>
 
 #define GET_OP_CLASSES
 #include "Ops.cpp.inc"
 
-using namespace mlir;
-using namespace mlir::inline_;
+namespace mlir::inline_ {
 
 ParseResult InlineRegionOp::parse(OpAsmParser &parser, OperationState &result) {
   SmallVector<OpAsmParser::UnresolvedOperand> operands;
@@ -105,3 +106,180 @@ void InlineRegionOp::build(OpBuilder &builder, OperationState &result,
 
   bodyRegion->push_back(body);
 }
+
+LogicalResult InlineRegionOp::addParsedRegionBody(ArrayRef<StringRef> inputNames,
+                                                  StringRef regionStr) {
+  if (inputNames.size() != getInputs().size()) {
+    return emitOpError("number of input names does not match expected number of inputs");
+  }
+
+  MLIRContext *context = getContext();
+  Location loc = getLoc();
+
+  // create a prelude with placeholder values using the provided names
+  std::string prelude;
+  for (size_t i = 0; i < getInputs().size(); ++i) {
+    std::string valueName = inputNames[i].str();
+    std::string typeStr;
+    llvm::raw_string_ostream os(typeStr);
+    getInputs()[i].getType().print(os);
+
+    // create a placeholder with marker attribute
+    prelude += "%" + valueName + " = \"builtin.unrealized_conversion_cast\"() {inline_placeholder = " +
+      std::to_string(i) + "} : () -> " + typeStr + "\n";
+  }
+
+  // combine prelude with the original region string
+  std::string fullStr = prelude + regionStr.str();
+
+  // InlineRegionOp::build ensures this block exists
+  Block* block = &getRegion().front();
+
+  // parse the combined string into the block
+  // don't verify during parsing because YieldOp will complain about its parent
+  ParserConfig config(context, /*verifyAfterParse=*/false);
+  if (failed(parseSourceString(fullStr, block, config))) {
+    return emitOpError("Failed to parse region string");
+  }
+
+  // replace placeholder values with block arguments
+  SmallVector<Operation*> placeholderOps;
+  for (Operation &op : *block) {
+    if (auto attr = op.getAttrOfType<IntegerAttr>("inline_placeholder")) {
+      // extract the index
+      int index = attr.getInt();
+
+      // replace uses with the corresponding block argument
+      if (index >= 0 && index < getInputs().size()) {
+        op.getResult(0).replaceAllUsesWith(block->getArgument(index));
+      }
+
+      // mark for removal
+      placeholderOps.push_back(&op);
+    }
+  }
+
+  // remove the placeholder ops
+  for (Operation* op : placeholderOps) {
+    op->erase();
+  }
+
+  // ensure the block has a terminator
+  OpBuilder builder(context);
+  ensureTerminator(getRegion(), builder, loc);
+
+  // now verify all child operations once the region is complete
+  for (Operation &op : *block) {
+    if (failed(mlir::verify(&op)))
+      return op.emitError("verification failed after parsing");
+  }
+
+  return success();
+}
+
+static LogicalResult invokeAndCaptureDiagnostics(
+    MLIRContext *context, 
+    std::string& capturedDiagnostics,
+    std::function<LogicalResult()> f) {
+  capturedDiagnostics.clear();
+  llvm::raw_string_ostream os(capturedDiagnostics);
+
+  // create a diagnostic handler that writes to our string
+  ScopedDiagnosticHandler handler(context,
+    [&os](Diagnostic &diag) {
+      diag.print(os);
+      os << "\n";
+      return success();
+    }
+  );
+
+  // invoke the function
+  LogicalResult result = f();
+
+  os.flush();
+
+  return result;
+}
+
+llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
+    Location loc,
+    ArrayRef<StringRef> operandNames,
+    ValueRange operands,
+    StringRef sourceString) {
+
+  if (operandNames.size() != operands.size()) {
+    llvm_unreachable("Internal compiler error: number of operand names doesn't match number of operands");
+  }
+
+  // we assume the source string is something like this:
+  //
+  // inline.inline_region %arg0, %arg1, ... : (arg0_ty, arg1_ty, ...) -> (result_tys...) {
+  //   <body>
+  // }
+  //
+  // We can't parse that directly because the parser won't recognize the operand names.
+  // So we need to prepend definitions to the source:
+  //
+  // %arg0 = builtin.unrealized_conversion_cast() { inline_placeholder = 0 } : () -> arg0_ty
+  // %arg1 = builtin.unrealized_conversion_cast() { inline_placeholder = 1 } : () -> arg1_ty
+  // ...
+  // inline.inline_region %arg0, %arg1, ...
+
+  // create a prelude with placeholder values using the provided operand names
+  std::string prelude;
+  for (size_t i = 0; i < operands.size(); ++i) {
+    std::string valueName = operandNames[i].str();
+    std::string typeStr;
+    llvm::raw_string_ostream os(typeStr);
+    operands[i].getType().print(os);
+
+    // create a placeholder SSA value with marker attribute
+    prelude += "%" + valueName + " = \"builtin.unrealized_conversion_cast\"() {inline_placeholder = " +
+      std::to_string(i) + "} : () -> " + typeStr + "\n";
+  }
+
+  // combine prelude with the original source string
+  std::string fullStr = prelude + sourceString.str();
+
+  // create a temporary Block and parse these operations into it
+  MLIRContext* ctx = loc->getContext();
+  Block block;
+  std::string diagnostics;
+  auto parseResult = invokeAndCaptureDiagnostics(ctx, diagnostics, [&] {
+    ParserConfig config(ctx);
+    return parseSourceString(fullStr, &block, config);
+  });
+
+  if (failed(parseResult)) {
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        diagnostics.empty() ? "Failed to parse source string" : diagnostics
+    );
+  }
+
+  // replace placeholder values with operands
+  for (Operation &op : block) {
+    if (auto attr = op.getAttrOfType<IntegerAttr>("inline_placeholder")) {
+      // extract the operand index
+      int operand_idx = attr.getInt();
+
+      // replace uses with the corresponding block argument
+      if (operand_idx >= 0 && operand_idx < operands.size()) {
+        op.getResult(0).replaceAllUsesWith(operands[operand_idx]);
+      }
+    }
+  }
+
+  // pick out the InlineRegionOp of interest
+  for (Operation &op : block) {
+    if (auto inline_region_op = dyn_cast<InlineRegionOp>(op)) {
+      // remove the InlineRegionOp from its parent Block
+      inline_region_op->remove();
+      return inline_region_op;
+    }
+  }
+
+  llvm_unreachable("Internal compiler error: no InlineRegionOp found in successfully parsed source");
+}
+
+} // end mlir::inline_
