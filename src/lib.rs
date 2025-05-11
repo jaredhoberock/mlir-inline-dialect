@@ -1,5 +1,6 @@
 use melior::{ir::{Location, Operation, Region, Type, TypeLike, Value, ValueLike}, Context, StringRef};
 use mlir_sys::{MlirContext, MlirLocation, MlirOperation, MlirRegion, MlirStringRef, MlirType, MlirValue};
+use thiserror::Error;
 
 #[link(name = "inline_dialect")]
 unsafe extern "C" {
@@ -14,6 +15,7 @@ unsafe extern "C" {
         operand_values: *const MlirValue,
         num_operands: isize,
         source_string: MlirStringRef,
+        error_loc: *mut MlirLocation,
         error_message: *mut std::ffi::c_char,
         error_message_buffer_capcity: isize) -> MlirOperation;
     fn inlineYieldOpCreate(loc: MlirLocation,
@@ -47,18 +49,30 @@ pub fn inline_region<'c>(
     }
 }
 
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct Error<'c> {
+    pub message: String,
+    pub location: Option<Location<'c>>,
+}
+
 pub fn parse_inline_region<'c>(
     loc: Location<'c>,
     operands: &[(StringRef, Value<'c,'_>)],
     src_str: StringRef,
-) -> Result<Operation<'c>,String> {
+) -> Result<Operation<'c>,Error<'c>> {
     unsafe {
-        let raw_operand_names: Vec<MlirStringRef> = operands.iter().map(|(n, _)| n.to_raw()).collect();
-        let raw_operand_values: Vec<MlirValue> = operands.iter().map(|(_, v)| v.to_raw()).collect();
+        let raw_operand_names: Vec<MlirStringRef>
+            = operands.iter().map(|(n, _)| n.to_raw()).collect();
+        let raw_operand_values: Vec<MlirValue>
+            = operands.iter().map(|(_, v)| v.to_raw()).collect();
 
         // allocate a fixed-size error message buffer
         const ERROR_MESSAGE_BUFFER_CAPACITY: usize = 1024;
         let mut error_buf = [0 as std::ffi::c_char; ERROR_MESSAGE_BUFFER_CAPACITY];
+
+        // out param for error location
+        let mut raw_error_loc = std::mem::MaybeUninit::<MlirLocation>::uninit();
 
         let raw_op = inlineInlineRegionOpParseFromSourceString(
             loc.to_raw(),
@@ -66,14 +80,24 @@ pub fn parse_inline_region<'c>(
             raw_operand_values.as_ptr(),
             operands.len() as isize,
             src_str.to_raw(),
+            raw_error_loc.as_mut_ptr(),
             error_buf.as_mut_ptr(),
             ERROR_MESSAGE_BUFFER_CAPACITY as isize,
         );
 
         if raw_op.ptr.is_null() {
-            // convert the c string to Rust String
-            let cstr = std::ffi::CStr::from_ptr(error_buf.as_ptr());
-            return Err(cstr.to_string_lossy().into_owned());
+            let message = std::ffi::CStr::from_ptr(error_buf.as_ptr())
+                .to_string_lossy()
+                .into_owned();
+
+            let error_loc = raw_error_loc.assume_init();
+            let location = if error_loc.ptr.is_null() {
+                None
+            } else {
+                Some(Location::from_raw(error_loc))
+            };
+
+            return Err(Error { message, location });
         }
 
         Ok(Operation::from_raw(raw_op))

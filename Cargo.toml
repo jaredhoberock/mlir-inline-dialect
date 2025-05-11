@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 melior = "0.24"
 mlir-sys = "0.5.0"
+thiserror = "1"
 
 [lib]
 name = "inline_dialect"

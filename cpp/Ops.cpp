@@ -177,28 +177,40 @@ LogicalResult InlineRegionOp::addParsedRegionBody(ArrayRef<StringRef> inputNames
   return success();
 }
 
-static LogicalResult invokeAndCaptureDiagnostics(
+char InlineRegionParseError::ID = 0;
+
+static std::optional<InlineRegionParseError> invokeAndCaptureFirstError(
     MLIRContext *context, 
-    std::string& capturedDiagnostics,
     std::function<LogicalResult()> f) {
-  capturedDiagnostics.clear();
-  llvm::raw_string_ostream os(capturedDiagnostics);
+  std::optional<InlineRegionParseError> captured;
 
   // create a diagnostic handler that writes to our string
-  ScopedDiagnosticHandler handler(context,
-    [&os](Diagnostic &diag) {
-      diag.print(os);
-      os << "\n";
+  ScopedDiagnosticHandler handler(context, [&](Diagnostic &diag) {
+    // only capture first error
+    if (captured.has_value())
       return success();
-    }
-  );
+      
+    if (diag.getSeverity() != DiagnosticSeverity::Error)
+      return success();
 
-  // invoke the function
-  LogicalResult result = f();
+    std::string message;
+    llvm::raw_string_ostream os(message);
+    os << diag.str(); // this omits the location prefix
+    os.flush();
 
-  os.flush();
+    captured = InlineRegionParseError(message, diag.getLocation());
 
-  return result;
+    return success();
+  });
+
+  // invoke the function and ignore the result
+  // we assume that if f produced failure(), then captured has an error in it
+  if (failed(f())) {
+    // presumably captured has an error inside it
+    // assert(captured.has_value());
+  }
+
+  return captured;
 }
 
 llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
@@ -244,17 +256,14 @@ llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
   // create a temporary Block and parse these operations into it
   MLIRContext* ctx = loc->getContext();
   Block block;
-  std::string diagnostics;
-  auto parseResult = invokeAndCaptureDiagnostics(ctx, diagnostics, [&] {
+
+  std::optional<InlineRegionParseError> error = invokeAndCaptureFirstError(ctx, [&] {
     ParserConfig config(ctx);
     return parseSourceString(fullStr, &block, config);
   });
 
-  if (failed(parseResult)) {
-    return llvm::createStringError(
-        llvm::inconvertibleErrorCode(),
-        diagnostics.empty() ? "Failed to parse source string" : diagnostics
-    );
+  if (error.has_value()) {
+    return llvm::make_error<InlineRegionParseError>(*error);
   }
 
   // replace placeholder values with operands

@@ -11,6 +11,24 @@
 
 namespace mlir::inline_ {
 
+struct InlineRegionParseError : public llvm::ErrorInfo<InlineRegionParseError> {
+  static char ID;
+
+  std::string message;
+  Location loc;
+
+  inline InlineRegionParseError(std::string message, Location loc)
+    : message(message), loc(loc) {}
+
+  inline std::error_code convertToErrorCode() const override {
+    return llvm::inconvertibleErrorCode();
+  }
+
+  inline void log(llvm::raw_ostream &os) const override {
+    os << message;
+  }
+};
+
 llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
     Location loc,
     ArrayRef<StringRef> operandNames,
