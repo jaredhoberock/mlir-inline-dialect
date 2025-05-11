@@ -41,7 +41,9 @@ MlirOperation inlineInlineRegionOpParseFromSourceString(
     MlirValue* wrappedOperands,
     intptr_t numOperands,
     MlirStringRef wrappedSourceString,
-    MlirLocation *wrappedErrorLoc,
+    size_t *errorLine,
+    size_t *errorCol,
+    size_t *errorByteOffset,
     char *errorMessageBuffer,
     intptr_t errorMessageBufferCapacity) {
 
@@ -72,10 +74,18 @@ MlirOperation inlineInlineRegionOpParseFromSourceString(
 
   // copy any error message into the caller's buffer
   std::string errorStr;
-  std::optional<Location> errorLoc;
+  size_t line = 0, col = 0, byteOffset = -1;
+
   llvm::handleAllErrors(result.takeError(), [&](const InlineRegionParseError &e) {
     errorStr = e.message;
-    errorLoc = e.loc;
+    if (auto fileLoc = dyn_cast<FileLineColLoc>(e.loc)) {
+      line = fileLoc.getLine();
+      col = fileLoc.getColumn();
+    }
+
+    if (e.byteOffset.has_value()) {
+      byteOffset = *e.byteOffset;
+    }
   });
 
   // copy error message
@@ -84,9 +94,9 @@ MlirOperation inlineInlineRegionOpParseFromSourceString(
   }
 
   // copy error location if requested
-  if (wrappedErrorLoc && errorLoc) {
-    *wrappedErrorLoc = wrap(*errorLoc);
-  }
+  if (errorLine) *errorLine = line;
+  if (errorCol) *errorCol = col;
+  if (errorByteOffset) *errorByteOffset = byteOffset;
 
   return MlirOperation{nullptr};
 }

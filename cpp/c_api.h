@@ -21,7 +21,9 @@ MlirOperation inlineInlineRegionOpParseFromSourceString(
     MlirValue* operands,
     intptr_t numInputs,
     MlirStringRef sourceString,
-    MlirLocation* errorLoc,
+    size_t* errorLine,
+    size_t* errorCol,
+    size_t* errorByteOffset,
     char* errorMessageBuffer,
     intptr_t errorMessageBufferCapacity);
 

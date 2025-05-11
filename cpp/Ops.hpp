@@ -16,9 +16,10 @@ struct InlineRegionParseError : public llvm::ErrorInfo<InlineRegionParseError> {
 
   std::string message;
   Location loc;
+  std::optional<size_t> byteOffset;
 
-  inline InlineRegionParseError(std::string message, Location loc)
-    : message(message), loc(loc) {}
+  inline InlineRegionParseError(std::string message, Location loc, std::optional<size_t> offset)
+    : message(message), loc(loc), byteOffset(offset) {}
 
   inline std::error_code convertToErrorCode() const override {
     return llvm::inconvertibleErrorCode();

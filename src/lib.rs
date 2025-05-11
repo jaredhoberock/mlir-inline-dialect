@@ -15,7 +15,9 @@ unsafe extern "C" {
         operand_values: *const MlirValue,
         num_operands: isize,
         source_string: MlirStringRef,
-        error_loc: *mut MlirLocation,
+        error_line: *mut usize,
+        error_column: *mut usize,
+        error_byte_offset: *mut usize,
         error_message: *mut std::ffi::c_char,
         error_message_buffer_capcity: isize) -> MlirOperation;
     fn inlineYieldOpCreate(loc: MlirLocation,
@@ -51,16 +53,16 @@ pub fn inline_region<'c>(
 
 #[derive(Debug, Error)]
 #[error("{message}")]
-pub struct Error<'c> {
+pub struct Error {
     pub message: String,
-    pub location: Option<Location<'c>>,
+    pub line_col_byte_offset: Option<(usize, usize, usize)>,
 }
 
 pub fn parse_inline_region<'c>(
     loc: Location<'c>,
     operands: &[(StringRef, Value<'c,'_>)],
     src_str: StringRef,
-) -> Result<Operation<'c>,Error<'c>> {
+) -> Result<Operation<'c>,Error> {
     unsafe {
         let raw_operand_names: Vec<MlirStringRef>
             = operands.iter().map(|(n, _)| n.to_raw()).collect();
@@ -70,9 +72,9 @@ pub fn parse_inline_region<'c>(
         // allocate a fixed-size error message buffer
         const ERROR_MESSAGE_BUFFER_CAPACITY: usize = 1024;
         let mut error_buf = [0 as std::ffi::c_char; ERROR_MESSAGE_BUFFER_CAPACITY];
-
-        // out param for error location
-        let mut raw_error_loc = std::mem::MaybeUninit::<MlirLocation>::uninit();
+        let mut error_line: usize = 0;
+        let mut error_column: usize = 0;
+        let mut error_byte_offset: usize = usize::MAX;
 
         let raw_op = inlineInlineRegionOpParseFromSourceString(
             loc.to_raw(),
@@ -80,7 +82,9 @@ pub fn parse_inline_region<'c>(
             raw_operand_values.as_ptr(),
             operands.len() as isize,
             src_str.to_raw(),
-            raw_error_loc.as_mut_ptr(),
+            &mut error_line as *mut usize,
+            &mut error_column as *mut usize,
+            &mut error_byte_offset as *mut usize,
             error_buf.as_mut_ptr(),
             ERROR_MESSAGE_BUFFER_CAPACITY as isize,
         );
@@ -90,14 +94,15 @@ pub fn parse_inline_region<'c>(
                 .to_string_lossy()
                 .into_owned();
 
-            let error_loc = raw_error_loc.assume_init();
-            let location = if error_loc.ptr.is_null() {
+            // if we were unable to capture any part of the error location,
+            // we don't report any location at all
+            let line_col_byte_offset = if error_line == 0 || error_column == 0 || error_byte_offset == usize::MAX {
                 None
             } else {
-                Some(Location::from_raw(error_loc))
+                Some((error_line, error_column, error_byte_offset))
             };
 
-            return Err(Error { message, location });
+            return Err(Error { message, line_col_byte_offset });
         }
 
         Ok(Operation::from_raw(raw_op))

@@ -1,5 +1,6 @@
 #include "Dialect.hpp"
 #include "Ops.hpp"
+#include <llvm/Support/ConvertUTF.h>
 #include <mlir/IR/Builders.h>
 #include <mlir/IR/Verifier.h>
 #include <mlir/Parser/Parser.h>
@@ -182,15 +183,14 @@ char InlineRegionParseError::ID = 0;
 static std::optional<InlineRegionParseError> invokeAndCaptureFirstError(
     MLIRContext *context, 
     std::function<LogicalResult()> f) {
+
   std::optional<InlineRegionParseError> captured;
 
   // create a diagnostic handler that writes to our string
   ScopedDiagnosticHandler handler(context, [&](Diagnostic &diag) {
-    // only capture first error
+    // only capture first error and ignore things that aren't errors
+    if (captured || diag.getSeverity() != DiagnosticSeverity::Error)
     if (captured.has_value())
-      return success();
-      
-    if (diag.getSeverity() != DiagnosticSeverity::Error)
       return success();
 
     std::string message;
@@ -198,8 +198,7 @@ static std::optional<InlineRegionParseError> invokeAndCaptureFirstError(
     os << diag.str(); // this omits the location prefix
     os.flush();
 
-    captured = InlineRegionParseError(message, diag.getLocation());
-
+    captured = InlineRegionParseError(message, diag.getLocation(), std::nullopt);
     return success();
   });
 
@@ -211,6 +210,42 @@ static std::optional<InlineRegionParseError> invokeAndCaptureFirstError(
   }
 
   return captured;
+}
+
+static std::optional<size_t> findByteOffsetOfLoc(llvm::StringRef buffer, unsigned targetLine, unsigned targetCol) {
+  if (targetLine == 0 || targetCol == 0)
+    return std::nullopt;
+
+  size_t byteOffset = 0;
+  unsigned curLine = 1;
+
+  // Move to start of target line
+  while (curLine < targetLine) {
+    size_t newlinePos = buffer.find('\n');
+    if (newlinePos == llvm::StringRef::npos)
+      return std::nullopt;
+    byteOffset += newlinePos + 1;
+    buffer = buffer.drop_front(newlinePos + 1);
+    ++curLine;
+  }
+
+  // Now buffer starts at target line; walk characters to compute byte offset of column
+  llvm::StringRef lineText = buffer.take_until([](char c) { return c == '\n'; });
+  size_t colOffset = 0;
+  unsigned charCount = 0;
+
+  for (auto it = lineText.begin(); it != lineText.end(); ) {
+    if (charCount == targetCol - 1)
+      break;
+    unsigned charLen = llvm::getNumBytesForUTF8(*it);
+    if (charLen == 0 || std::distance(it, lineText.end()) < charLen)
+      return std::nullopt;
+    it += charLen;
+    colOffset += charLen;
+    ++charCount;
+  }
+
+  return byteOffset + colOffset;
 }
 
 llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
@@ -239,6 +274,7 @@ llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
 
   // create a prelude with placeholder values using the provided operand names
   std::string prelude;
+  size_t preludeLineCount = 0;
   for (size_t i = 0; i < operands.size(); ++i) {
     std::string valueName = operandNames[i].str();
     std::string typeStr;
@@ -248,6 +284,7 @@ llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
     // create a placeholder SSA value with marker attribute
     prelude += "%" + valueName + " = \"builtin.unrealized_conversion_cast\"() {inline_placeholder = " +
       std::to_string(i) + "} : () -> " + typeStr + "\n";
+    ++preludeLineCount;
   }
 
   // combine prelude with the original source string
@@ -256,14 +293,44 @@ llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
   // create a temporary Block and parse these operations into it
   MLIRContext* ctx = loc->getContext();
   Block block;
-
-  std::optional<InlineRegionParseError> error = invokeAndCaptureFirstError(ctx, [&] {
+  auto error = invokeAndCaptureFirstError(ctx, [&] {
     ParserConfig config(ctx);
     return parseSourceString(fullStr, &block, config);
   });
 
-  if (error.has_value()) {
-    return llvm::make_error<InlineRegionParseError>(*error);
+  // if there was an error, adjust the error location
+  // to account for the prelude
+  if (error) {
+    InlineRegionParseError adjusted = *error;
+
+    if (auto fileLoc = dyn_cast<FileLineColLoc>(error->loc)) {
+      llvm::StringRef full = fullStr;
+      unsigned line = fileLoc.getLine();
+      unsigned col = fileLoc.getColumn();
+      auto byteOffset = findByteOffsetOfLoc(fullStr, line, col);
+
+      // adjust line, col, & byteOffset to account for the prelude
+      if (line > preludeLineCount) {
+        // location is within the user's code
+        unsigned adjustedLine = line - preludeLineCount;
+        adjusted.loc = FileLineColLoc::get(ctx, fileLoc.getFilename(), adjustedLine, col);
+      } else {
+        // location is in the prelude, collapse to start of user region
+        adjusted.loc = FileLineColLoc::get(ctx, fileLoc.getFilename(), 1, 1);
+        byteOffset = 0;
+      }
+
+      // adjust byte offset if it was found
+      if (byteOffset && *byteOffset >= prelude.size()) {
+        // location is within the user's code
+        adjusted.byteOffset = *byteOffset - prelude.size();
+      } else {
+        // location is within the prelude
+        adjusted.byteOffset = std::nullopt;
+      }
+    }
+
+    return llvm::make_error<InlineRegionParseError>(adjusted);
   }
 
   // replace placeholder values with operands
