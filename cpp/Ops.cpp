@@ -11,14 +11,53 @@
 
 namespace mlir::inline_ {
 
+ParseResult parseInlineRegionOpSignatureTypes(
+    OpAsmParser &parser,
+    FunctionType &signatureType) {
+  SmallVector<Type> inputTypes;
+  SmallVector<Type> resultTypes;
+
+  // parse inputs: must always be wrapped in parenthesis
+  if (parser.parseLParen())
+    return failure();
+
+  // check if it's an empty input list
+  if (parser.parseOptionalRParen().failed()) {
+    // it's not empty - parse non-empty input list
+    if (parser.parseTypeList(inputTypes) || parser.parseRParen())
+      return failure();
+  }
+
+  // optionally parse -> result types
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (failed(parser.parseOptionalLParen())) {
+      Type resultType;
+      if (parser.parseType(resultType))
+        return failure();
+      resultTypes.push_back(resultType);
+    } else {
+      // parse tuple-style multiple result types
+      if (parser.parseTypeList(resultTypes) || parser.parseRParen())
+        return failure();
+    }
+  }
+
+  signatureType = FunctionType::get(parser.getContext(), inputTypes, resultTypes);
+  return success();
+}
+
 ParseResult InlineRegionOp::parse(OpAsmParser &parser, OperationState &result) {
   SmallVector<OpAsmParser::UnresolvedOperand> operands;
   if (parser.parseOperandList(operands))
     return failure();
 
-  // parse colon and input/output types
+  // parse colon
+  if (parser.parseColon())
+    return failure();
+
+  // parse signature types
   FunctionType funcType;
-  if (parser.parseColonType(funcType))
+  if (parseInlineRegionOpSignatureTypes(parser, funcType))
     return failure();
 
   // resolve operands against function input types
@@ -47,12 +86,36 @@ ParseResult InlineRegionOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void InlineRegionOp::print(OpAsmPrinter &p) {
-  p << " " << getInputs();
-  p << " : ";
-  p.printFunctionalType(getInputs().getTypes(), getResultTypes());
+  // Print inputs if there are any
+  if (!getInputs().empty()) {
+    p << " " << getInputs();
+  }
+
+  // Print colon and input types in parentheses
+  p << " : (";
+  llvm::interleaveComma(getInputs().getTypes(), p);
+  p << ")";
+
+  // Print result types if nonempty
+  if (!getResultTypes().empty()) {
+    p << " -> ";
+    if (getResultTypes().size() > 1) {
+      p << "(";
+      llvm::interleaveComma(getResultTypes(), p);
+      p << ")";
+    } else {
+      p << getResultTypes()[0];
+    }
+  }
+
+  // Ensure region uses operand names
   p << " ";
   p.shadowRegionArgs(getRegion(), getOperands());
-  p.printRegion(getRegion(), /* printEntryBlockArgs = */ false);
+
+  // Print region body (without repeating entry block args)
+  p.printRegion(getRegion(), /*printEntryBlockArgs=*/false);
+
+  // Print optional attributes
   p.printOptionalAttrDict((*this)->getAttrs());
 }
 

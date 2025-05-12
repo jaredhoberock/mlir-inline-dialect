@@ -16,9 +16,12 @@ def InlineRegionOp : InlineOp<"inline_region", [
   let summary = "Runs a region with explicitly specified arguments and a return value";
 
   let description = [{
-    The `inline.inline_region` operation takes a list of operands and executes a regionj
+    The `inline.inline_region` operation takes a list of operands and a region
     with those operands bound to SSA values of the same name within the region.
     referenced by their symbol name within the region.
+
+    The effect of the operation is to inline the region into the parent operation
+    during lowering.
 
     Example:
     ```mlir
