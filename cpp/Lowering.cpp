@@ -2,7 +2,6 @@
 #include "Lowering.hpp"
 #include "Ops.hpp"
 #include <mlir/Conversion/LLVMCommon/TypeConverter.h>
-#include <mlir/IR/IRMapping.h>
 #include <mlir/Transforms/DialectConversion.h>
 
 namespace mlir::inline_ {
@@ -12,36 +11,14 @@ struct InlineRegionOpLowering : public OpConversionPattern<InlineRegionOp> {
 
   LogicalResult matchAndRewrite(InlineRegionOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    // Get the region to inline
-    Region& sourceRegion = op.getRegion();
-    Block& sourceBlock = sourceRegion.front();
-    
-    // Check for terminator
-    auto yieldOp = dyn_cast<YieldOp>(sourceBlock.getTerminator());
-    if (!yieldOp)
-      return rewriter.notifyMatchFailure(op, "expected inline.yield terminator");
-    
-    // Clone all operations (except terminator) before our op
-    rewriter.setInsertionPoint(op);
-    
-    // Map block arguments to input values
-    IRMapping mapper;
-    for (auto [blockArg, operand] : llvm::zip(sourceBlock.getArguments(), 
-                                             adaptor.getInputs())) {
-      mapper.map(blockArg, operand);
+    // inline the op's region and get the results
+    SmallVector<Value,4> results;
+    std::string errorMessage;
+    if (failed(op.inlineIntoParent(adaptor.getInputs(), rewriter, results, errorMessage))) {
+      return rewriter.notifyMatchFailure(op, errorMessage);
     }
     
-    // Clone all operations except the terminator
-    for (auto& nestedOp : sourceBlock.without_terminator()) {
-      rewriter.clone(nestedOp, mapper);
-    }
-    
-    // Replace the original op with the mapped yield values
-    SmallVector<Value> results;
-    for (auto result : yieldOp.getResults()) {
-      results.push_back(mapper.lookupOrDefault(result));
-    }
-    
+    // replace the original op with its results
     rewriter.replaceOp(op, results);
     return success();
   }

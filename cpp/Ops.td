@@ -5,13 +5,15 @@ include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpAsmInterface.td"
 include "mlir/IR/OpBase.td"
+include "mlir/IR/SymbolInterfaces.td"
 include "Dialect.td"
 
 def InlineRegionOp : InlineOp<"inline_region", [
   AutomaticAllocationScope,
   IsolatedFromAbove,
   OpAsmOpInterface,
-  SingleBlockImplicitTerminator<"YieldOp">
+  SingleBlockImplicitTerminator<"YieldOp">,
+  SymbolTable
 ]> {
   let summary = "Runs a region with explicitly specified arguments and a return value";
 
@@ -48,6 +50,12 @@ def InlineRegionOp : InlineOp<"inline_region", [
   let extraClassDeclaration = [{
     mlir::LogicalResult addParsedRegionBody(llvm::ArrayRef<llvm::StringRef> inputNames,
                                             llvm::StringRef regionStr);
+
+
+    mlir::LogicalResult inlineIntoParent(mlir::ValueRange inputs,
+                                         mlir::OpBuilder& builder,
+                                         llvm::SmallVector<Value,4> &yieldedValues,
+                                         std::string &errorMessage);
 
     //===------------------------------------------------------------------===//
     // OpAsmOpInterface Methods

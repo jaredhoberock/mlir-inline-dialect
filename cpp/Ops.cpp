@@ -2,6 +2,7 @@
 #include "Ops.hpp"
 #include <llvm/Support/ConvertUTF.h>
 #include <mlir/IR/Builders.h>
+#include <mlir/IR/IRMapping.h>
 #include <mlir/IR/Verifier.h>
 #include <mlir/Parser/Parser.h>
 #include <iostream>
@@ -310,6 +311,58 @@ static std::optional<size_t> findByteOffsetOfLoc(llvm::StringRef buffer, unsigne
 
   return byteOffset + colOffset;
 }
+
+/// Clones the body of an `inline.inline_region` operation into its parent block.
+///
+/// The region must contain a single block ending with `inline.yield`. All operations
+/// (except the terminator) are cloned before `op`, with block arguments mapped to `inputs`.
+/// The mapped yield values are written into `yieldedValues`.
+///
+/// The original `op` is not erased; the caller is responsible for cleanup.
+///
+/// Returns `failure()` if the region is malformed (e.g., missing `inline.yield`),
+/// in which case `errorMessage` is populated.
+LogicalResult InlineRegionOp::inlineIntoParent(ValueRange inputs,
+                                               OpBuilder &builder,
+                                               SmallVector<Value,4> &yieldedValues,
+                                               std::string &errorMessage) {
+  OpBuilder::InsertionGuard guard(builder);
+
+  // get the region to inline
+  Region& sourceRegion = getRegion();
+  Block &sourceBlock = sourceRegion.front();
+
+  // check for terminator
+  auto yieldOp = dyn_cast<YieldOp>(sourceBlock.getTerminator());
+  if (!yieldOp) {
+    errorMessage = "expected inline.yield terminator";
+    return failure();
+  }
+
+  // clone all operations (except terminator) immediately before our op
+  builder.setInsertionPoint(*this);
+
+  // map block arguments to input values
+  IRMapping mapper;
+  for (auto [blockArg, operand] : llvm::zip(sourceBlock.getArguments(),
+                                            inputs)) {
+    mapper.map(blockArg, operand);
+  }
+
+  // clone all operations except the terminator
+  for (auto& nestedOp : sourceBlock.without_terminator()) {
+    builder.clone(nestedOp, mapper);
+  }
+
+  // collect the mapped yield values
+  yieldedValues.clear();
+  for (auto result : yieldOp.getResults()) {
+    yieldedValues.push_back(mapper.lookupOrDefault(result));
+  }
+
+  return success();
+}
+
 
 llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
     Location loc,
