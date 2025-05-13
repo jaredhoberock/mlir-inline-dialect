@@ -5,6 +5,7 @@
 #include <mlir/CAPI/IR.h>
 #include <mlir/CAPI/Pass.h>
 #include <mlir/IR/Builders.h>
+#include <mlir/IR/Verifier.h>
 #include <mlir/Parser/Parser.h>
 
 using namespace mlir;
@@ -34,6 +35,37 @@ MlirOperation inlineInlineRegionOpCreate(MlirLocation loc,
 
   return wrap(builder.create(state));
 }
+
+
+void extractInlineParseErrorLocationAndMessage(
+    llvm::Error &&err,
+    size_t *errorLine,
+    size_t *errorCol,
+    size_t *errorByteOffset,
+    char *errorMessageBuffer,
+    intptr_t errorMessageBufferCapacity) {
+
+  std::string errorMessage;
+  size_t line = 0, col = 0;
+  size_t byteOffset = static_cast<size_t>(-1);  // sentinel for unknown offset
+
+  llvm::handleAllErrors(std::move(err), [&](const InlineRegionParseError &e) {
+    errorMessage = e.message;
+    if (auto loc = e.getLocation()) {
+      std::tie(line, col, byteOffset) = *loc;
+    }
+  });
+
+  if (errorLine) *errorLine = line;
+  if (errorCol) *errorCol = col;
+  if (errorByteOffset) *errorByteOffset = byteOffset;
+
+  if (errorMessageBuffer && errorMessageBufferCapacity > 0) {
+    std::snprintf(errorMessageBuffer, errorMessageBufferCapacity,
+                  "%s", errorMessage.c_str());
+  }
+}
+
 
 MlirOperation inlineInlineRegionOpParseFromSourceString(
     MlirLocation wrappedLoc,
@@ -66,40 +98,88 @@ MlirOperation inlineInlineRegionOpParseFromSourceString(
     loc,
     operandNames,
     operands,
-    sourceString
+    sourceString,
+    /*verifyAfterParse=*/false
   );
 
   if (result)
     return wrap(*result);
 
-  // copy any error message into the caller's buffer
-  std::string errorStr;
-  size_t line = 0, col = 0, byteOffset = -1;
-
-  llvm::handleAllErrors(result.takeError(), [&](const InlineRegionParseError &e) {
-    errorStr = e.message;
-    if (auto fileLoc = dyn_cast<FileLineColLoc>(e.loc)) {
-      line = fileLoc.getLine();
-      col = fileLoc.getColumn();
-    }
-
-    if (e.byteOffset.has_value()) {
-      byteOffset = *e.byteOffset;
-    }
-  });
-
-  // copy error message
-  if (errorMessageBuffer && errorMessageBufferCapacity > 0) {
-    std::snprintf(errorMessageBuffer, errorMessageBufferCapacity, "%s", errorStr.c_str());
-  }
-
-  // copy error location if requested
-  if (errorLine) *errorLine = line;
-  if (errorCol) *errorCol = col;
-  if (errorByteOffset) *errorByteOffset = byteOffset;
+  // get the error information
+  extractInlineParseErrorLocationAndMessage(result.takeError(),
+                                            errorLine, errorCol, errorByteOffset,
+                                            errorMessageBuffer, errorMessageBufferCapacity);
 
   return MlirOperation{nullptr};
 }
+
+
+InlineValueList inlineParseSourceStringIntoBlock(
+    MlirLocation wrappedLoc,
+    MlirStringRef* wrappedOperandNames,
+    MlirValue* wrappedOperands,
+    intptr_t numOperands,
+    MlirType* wrappedResultTypes,
+    intptr_t numResultTypes,
+    MlirStringRef wrappedSourceString,
+    MlirBlock wrappedBlock,
+    size_t* errorLine,
+    size_t* errorCol,
+    size_t* errorByteOffset,
+    char* errorMessageBuffer,
+    intptr_t errorMessageBufferCapacity) {
+
+  InlineValueList out = {
+    .succeeded = false,
+    .count = 0,
+    .values = nullptr
+  };
+
+  Location loc = unwrap(wrappedLoc);
+  Block* block = unwrap(wrappedBlock);
+
+  // unwrap inputs
+  SmallVector<StringRef,4> operandNames;
+  SmallVector<Value,4> operandValues;
+  for (intptr_t i = 0; i < numOperands; ++i) {
+    operandNames.push_back(StringRef(wrappedOperandNames[i].data, wrappedOperandNames[i].length));
+    operandValues.push_back(unwrap(wrappedOperands[i]));
+  }
+
+  // wrap result types
+  SmallVector<Type,4> resultTypes;
+  for (intptr_t i = 0; i < numResultTypes; ++i) {
+    resultTypes.push_back(unwrap(wrappedResultTypes[i]));
+  }
+
+  StringRef sourceString = StringRef(wrappedSourceString.data, wrappedSourceString.length);
+
+  // call C++
+  llvm::Expected<SmallVector<Value>> result =
+    parseSourceStringIntoBlock(loc, operandNames, operandValues, resultTypes, sourceString, block);
+
+  // handle error case
+  if (!result) {
+    extractInlineParseErrorLocationAndMessage(result.takeError(),
+                                              errorLine, errorCol, errorByteOffset,
+                                              errorMessageBuffer, errorMessageBufferCapacity);
+    return out;
+  }
+
+  // success: wrap results into MlirValue[]
+  const SmallVector<Value> &values = *result;
+  out.succeeded = true;
+  out.count = static_cast<intptr_t>(values.size());
+  out.values = out.count > 0
+    ? static_cast<MlirValue*>(malloc(sizeof(MlirValue) * out.count))
+    : nullptr;
+
+  for (intptr_t i = 0; i < out.count; ++i)
+    out.values[i] = wrap(values[i]);
+
+  return out;
+}
+
 
 MlirOperation inlineYieldOpCreate(MlirLocation loc, MlirValue *results, intptr_t numResults) {
   MLIRContext *context = unwrap(loc)->getContext();
@@ -111,5 +191,6 @@ MlirOperation inlineYieldOpCreate(MlirLocation loc, MlirValue *results, intptr_t
 
   return wrap(builder.create(state));
 }
+
 
 } // end extern "C"

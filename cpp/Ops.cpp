@@ -1,6 +1,7 @@
 #include "Dialect.hpp"
 #include "Ops.hpp"
 #include <llvm/Support/ConvertUTF.h>
+#include <llvm/ADT/StringExtras.h>
 #include <mlir/IR/Builders.h>
 #include <mlir/IR/IRMapping.h>
 #include <mlir/IR/Verifier.h>
@@ -312,7 +313,7 @@ static std::optional<size_t> findByteOffsetOfLoc(llvm::StringRef buffer, unsigne
   return byteOffset + colOffset;
 }
 
-/// Clones the body of an `inline.inline_region` operation into its parent block.
+/// Clones the body of an `inline.inline_region` operation using the provided builder.
 ///
 /// The region must contain a single block ending with `inline.yield`. All operations
 /// (except the terminator) are cloned before `op`, with block arguments mapped to `inputs`.
@@ -322,12 +323,10 @@ static std::optional<size_t> findByteOffsetOfLoc(llvm::StringRef buffer, unsigne
 ///
 /// Returns `failure()` if the region is malformed (e.g., missing `inline.yield`),
 /// in which case `errorMessage` is populated.
-LogicalResult InlineRegionOp::inlineIntoParent(ValueRange inputs,
-                                               OpBuilder &builder,
-                                               SmallVector<Value,4> &yieldedValues,
-                                               std::string &errorMessage) {
-  OpBuilder::InsertionGuard guard(builder);
-
+LogicalResult InlineRegionOp::cloneBodyAtInsertionPoint(OpBuilder &builder,
+                                                        ValueRange inputs,
+                                                        SmallVectorImpl<Value> &yieldedValues,
+                                                        std::string &errorMessage) {
   // get the region to inline
   Region& sourceRegion = getRegion();
   Block &sourceBlock = sourceRegion.front();
@@ -338,9 +337,6 @@ LogicalResult InlineRegionOp::inlineIntoParent(ValueRange inputs,
     errorMessage = "expected inline.yield terminator";
     return failure();
   }
-
-  // clone all operations (except terminator) immediately before our op
-  builder.setInsertionPoint(*this);
 
   // map block arguments to input values
   IRMapping mapper;
@@ -364,11 +360,45 @@ LogicalResult InlineRegionOp::inlineIntoParent(ValueRange inputs,
 }
 
 
+void adjustErrorLocationToAccountForPrelude(InlineRegionParseError &error,
+                                            MLIRContext* ctx,
+                                            StringRef fullSourceStr,
+                                            size_t numPreludeLines,
+                                            size_t numPreludeBytes) {
+  if (auto fileLoc = dyn_cast<FileLineColLoc>(error.loc)) {
+    unsigned line = fileLoc.getLine();
+    unsigned col = fileLoc.getColumn();
+    auto byteOffset = findByteOffsetOfLoc(fullSourceStr, line, col);
+  
+    // adjust line, col, & byteOffset to account for the prelude
+    if (line > numPreludeLines) {
+      // location is within the user's code
+      unsigned adjustedLine = line - numPreludeLines;
+      error.loc = FileLineColLoc::get(ctx, fileLoc.getFilename(), adjustedLine, col);
+    } else {
+      // location is in the prelude, collapse to start of user region
+      error.loc = FileLineColLoc::get(ctx, fileLoc.getFilename(), 1, 1);
+      byteOffset = 0;
+    }
+  
+    // adjust byte offset if it was found
+    if (byteOffset && *byteOffset >= numPreludeBytes) {
+      // location is within the user's code
+      error.byteOffset = *byteOffset - numPreludeBytes;
+    } else {
+      // location is within the prelude
+      error.byteOffset = std::nullopt;
+    }
+  }
+}
+
+
 llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
     Location loc,
     ArrayRef<StringRef> operandNames,
     ValueRange operands,
-    StringRef sourceString) {
+    StringRef sourceString,
+    bool verifyAfterParse) {
 
   if (operandNames.size() != operands.size()) {
     llvm_unreachable("Internal compiler error: number of operand names doesn't match number of operands");
@@ -410,43 +440,18 @@ llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
   MLIRContext* ctx = loc->getContext();
   Block block;
   auto error = invokeAndCaptureFirstError(ctx, [&] {
-    ParserConfig config(ctx);
+    ParserConfig config(ctx, verifyAfterParse);
     return parseSourceString(fullStr, &block, config);
   });
 
   // if there was an error, adjust the error location
   // to account for the prelude
   if (error) {
-    InlineRegionParseError adjusted = *error;
-
-    if (auto fileLoc = dyn_cast<FileLineColLoc>(error->loc)) {
-      llvm::StringRef full = fullStr;
-      unsigned line = fileLoc.getLine();
-      unsigned col = fileLoc.getColumn();
-      auto byteOffset = findByteOffsetOfLoc(fullStr, line, col);
-
-      // adjust line, col, & byteOffset to account for the prelude
-      if (line > preludeLineCount) {
-        // location is within the user's code
-        unsigned adjustedLine = line - preludeLineCount;
-        adjusted.loc = FileLineColLoc::get(ctx, fileLoc.getFilename(), adjustedLine, col);
-      } else {
-        // location is in the prelude, collapse to start of user region
-        adjusted.loc = FileLineColLoc::get(ctx, fileLoc.getFilename(), 1, 1);
-        byteOffset = 0;
-      }
-
-      // adjust byte offset if it was found
-      if (byteOffset && *byteOffset >= prelude.size()) {
-        // location is within the user's code
-        adjusted.byteOffset = *byteOffset - prelude.size();
-      } else {
-        // location is within the prelude
-        adjusted.byteOffset = std::nullopt;
-      }
-    }
-
-    return llvm::make_error<InlineRegionParseError>(adjusted);
+    adjustErrorLocationToAccountForPrelude(*error,
+                                           ctx,
+                                           fullStr,
+                                           preludeLineCount, prelude.size());
+    return llvm::make_error<InlineRegionParseError>(*error);
   }
 
   // replace placeholder values with operands
@@ -473,5 +478,174 @@ llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
 
   llvm_unreachable("Internal compiler error: no InlineRegionOp found in successfully parsed source");
 }
+
+
+LogicalResult verifyOperationsAndSymbolUses(Block::iterator opsBegin, Block::iterator opsEnd) {
+  // first verify each operation individually
+  for (auto op = opsBegin; op != opsEnd; ++op) {
+    if (failed(verify(&*op))) {
+      return failure();
+    }
+  }
+  
+  // now verify symbol uses across all operations
+  SymbolTableCollection symbolTable;
+  for (auto op = opsBegin; op != opsEnd; ++op) {
+    if (auto symbolUser = dyn_cast<SymbolUserOpInterface>(*op)) {
+      if (failed(symbolUser.verifySymbolUses(symbolTable))) {
+        return failure();
+      }
+    }
+  }
+
+  return success();
+}
+
+
+// `%arg0, %arg1, ...`
+std::string buildOperandNamesString(ArrayRef<StringRef> names) {
+  // prepend '%' to every name
+  SmallVector<std::string> prefixed;
+  prefixed.reserve(names.size());
+  for (StringRef name : names)
+    prefixed.push_back(("%" + name).str());
+
+  return join(prefixed, ", ");
+}
+
+
+// `arg_ty0, arg_ty1, ...`
+std::string buildOperandTypesString(ValueRange values) {
+  std::string out;
+  llvm::raw_string_ostream os(out);
+
+  bool first = true;
+  for (Value v : values) {
+    if (!first)
+      os << ", ";
+    first = false;
+
+    v.getType().print(os);
+  }
+  os.flush();
+  return out;
+}
+
+
+std::string buildResultTypesString(TypeRange types) {
+  // if there are no results, return the empty string
+  if (types.empty())
+    return {};
+
+  std::string out;
+  llvm::raw_string_ostream os(out);
+
+  os << "-> ";
+
+  if (types.size() == 1) {
+    // if there is a single result, return "-> result_ty0"
+    types[0].print(os);
+  } else {
+    // otherwise, wrap in parens
+    os << "(";
+
+    bool first = true;
+    for (Type ty : types) {
+      if (!first)
+        os << ", ";
+      first = false;
+
+      ty.print(os);
+    }
+
+    os << ")";
+  }
+  os.flush();
+  return out;
+}
+
+
+std::pair<std::string,std::string> buildInlineRegionSourceStringSuffixAndPrefix(
+    ArrayRef<StringRef> operandNames,
+    ValueRange operands,
+    TypeRange resultTypes) {
+  std::string operandNamesStr = buildOperandNamesString(operandNames);
+  std::string operandTypesStr = buildOperandTypesString(operands);
+  std::string resultTypesStr = buildResultTypesString(resultTypes);
+
+  std::string prefixStr = "inline.inline_region " + operandNamesStr + " : (" + operandTypesStr + ") " + resultTypesStr + " { ";
+  std::string suffixStr = "}";
+
+  return std::make_pair(prefixStr, suffixStr);
+}
+
+
+llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
+    Location loc,
+    ArrayRef<StringRef> operandNames,
+    ValueRange operands,
+    TypeRange resultTypes,
+    StringRef sourceString,
+    Block *block) {
+
+  // wrap the source string into a full inline.inline_region operation
+  std::string prefixString, suffixString;
+  std::tie(prefixString, suffixString)
+    = buildInlineRegionSourceStringSuffixAndPrefix(operandNames, operands, resultTypes);
+
+  std::string fullSourceString = prefixString + "\n" + std::string(sourceString) + "\n" + suffixString;
+
+  // parse the inline.inline_region op
+  // don't verify the ops while parsing. we'll do that below once they're
+  // in the destination block
+  llvm::Expected<InlineRegionOp> maybeOp =
+    parseInlineRegionOpFromSourceString(loc, operandNames, operands,
+                                        fullSourceString, /*verifyAfterParse=*/false);
+
+  // if there was an error, adjust error locations so that they point into the sourceString
+  // that was actually passed by the caller
+  if (!maybeOp) {
+    return llvm::handleErrors(maybeOp.takeError(), [&](InlineRegionParseError &error) {
+      adjustErrorLocationToAccountForPrelude(error,
+                                             loc.getContext(),
+                                             fullSourceString,
+                                             1, // the prefix is constructed to be exactly one line
+                                             prefixString.size());
+      return llvm::make_error<InlineRegionParseError>(std::move(error));
+    });
+  }
+
+  auto op = *maybeOp;
+
+  // insert the op at the end of the block
+  block->push_back(op);
+
+  // inline the body at the end of the block
+  OpBuilder builder(op->getContext());
+  builder.setInsertionPointToEnd(block);
+
+  SmallVector<Value> results;
+  std::string error;
+  if (failed(op.cloneBodyAtInsertionPoint(builder, op.getInputs(), results, error)))
+    return llvm::createStringError(llvm::inconvertibleErrorCode(), error);
+
+  auto newOpsBegin = std::next(Block::iterator(op));
+
+  // erase the InlineRegionOp
+  op.erase();
+
+  // verify the new ops
+  auto verifyError = invokeAndCaptureFirstError(loc->getContext(), [&] {
+    return verifyOperationsAndSymbolUses(newOpsBegin, block->end());
+  });
+
+  // check for a verification error
+  if (verifyError)
+    return llvm::make_error<InlineRegionParseError>(*verifyError);
+
+  // success; return the results
+  return results;
+}
+
 
 } // end mlir::inline_

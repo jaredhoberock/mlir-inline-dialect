@@ -14,7 +14,7 @@ struct InlineRegionOpLowering : public OpConversionPattern<InlineRegionOp> {
     // inline the op's region and get the results
     SmallVector<Value,4> results;
     std::string errorMessage;
-    if (failed(op.inlineIntoParent(adaptor.getInputs(), rewriter, results, errorMessage))) {
+    if (failed(op.cloneBodyAtInsertionPoint(rewriter, adaptor.getInputs(), results, errorMessage))) {
       return rewriter.notifyMatchFailure(op, errorMessage);
     }
     

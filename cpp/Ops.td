@@ -52,10 +52,10 @@ def InlineRegionOp : InlineOp<"inline_region", [
                                             llvm::StringRef regionStr);
 
 
-    mlir::LogicalResult inlineIntoParent(mlir::ValueRange inputs,
-                                         mlir::OpBuilder& builder,
-                                         llvm::SmallVector<Value,4> &yieldedValues,
-                                         std::string &errorMessage);
+    mlir::LogicalResult cloneBodyAtInsertionPoint(mlir::OpBuilder& builder,
+                                                  mlir::ValueRange inputs,
+                                                  llvm::SmallVectorImpl<Value> &yieldedValues,
+                                                  std::string &errorMessage);
 
     //===------------------------------------------------------------------===//
     // OpAsmOpInterface Methods
