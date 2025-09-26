@@ -15,18 +15,6 @@ MlirOperation inlineInlineRegionOpCreate(MlirLocation loc,
                                          MlirType* resultTypes, intptr_t numResults,
                                          MlirRegion region);
 
-MlirOperation inlineInlineRegionOpParseFromSourceString(
-    MlirLocation loc,
-    MlirStringRef* operandNames,
-    MlirValue* operands,
-    intptr_t numInputs,
-    MlirStringRef sourceString,
-    size_t* errorLine,
-    size_t* errorCol,
-    size_t* errorByteOffset,
-    char* errorMessageBuffer,
-    intptr_t errorMessageBufferCapacity);
-
 struct InlineValueList {
   // true if parsing and inlining succeeded
   bool succeeded;

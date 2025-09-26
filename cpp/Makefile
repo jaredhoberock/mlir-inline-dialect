@@ -6,7 +6,7 @@ OPT := $(LLVM_BIN_PATH)/mlir-opt
 
 # Compiler flags
 CXX := clang++
-CXXFLAGS := -g -fPIC `$(LLVM_CONFIG) --cxxflags`
+CXXFLAGS := -Wall -Werror -g -fPIC `$(LLVM_CONFIG) --cxxflags`
 
 # LLVM/MLIR libraries
 MLIR_INCLUDE = /home/jhoberock/dev/git/llvm-project-20/install/include

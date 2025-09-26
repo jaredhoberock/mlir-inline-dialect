@@ -1,6 +1,7 @@
 #include "c_api.h"
 #include "Dialect.hpp"
 #include "Ops.hpp"
+#include "Parsing.hpp"
 #include <llvm/Support/SourceMgr.h>
 #include <mlir/CAPI/IR.h>
 #include <mlir/CAPI/Pass.h>
@@ -37,7 +38,7 @@ MlirOperation inlineInlineRegionOpCreate(MlirLocation loc,
 }
 
 
-void extractInlineParseErrorLocationAndMessage(
+static void extractInlineParseErrorLocationAndMessage(
     llvm::Error &&err,
     size_t *errorLine,
     size_t *errorCol,
@@ -64,53 +65,6 @@ void extractInlineParseErrorLocationAndMessage(
     std::snprintf(errorMessageBuffer, errorMessageBufferCapacity,
                   "%s", errorMessage.c_str());
   }
-}
-
-
-MlirOperation inlineInlineRegionOpParseFromSourceString(
-    MlirLocation wrappedLoc,
-    MlirStringRef* wrappedOperandNames,
-    MlirValue* wrappedOperands,
-    intptr_t numOperands,
-    MlirStringRef wrappedSourceString,
-    size_t *errorLine,
-    size_t *errorCol,
-    size_t *errorByteOffset,
-    char *errorMessageBuffer,
-    intptr_t errorMessageBufferCapacity) {
-
-  Location loc = unwrap(wrappedLoc);
-  MLIRContext* context = loc->getContext();
-
-  // collect operand names and values
-  SmallVector<StringRef> operandNames;
-  SmallVector<Value> operands;
-  for (intptr_t i = 0; i < numOperands; ++i) {
-    operandNames.push_back(StringRef(wrappedOperandNames[i].data, wrappedOperandNames[i].length));
-    operands.push_back(unwrap(wrappedOperands[i]));
-  }
-
-  // unwrap the source string
-  StringRef sourceString = StringRef(wrappedSourceString.data, wrappedSourceString.length);
-
-  // parse
-  llvm::Expected<InlineRegionOp> result = parseInlineRegionOpFromSourceString(
-    loc,
-    operandNames,
-    operands,
-    sourceString,
-    /*verifyAfterParse=*/false
-  );
-
-  if (result)
-    return wrap(*result);
-
-  // get the error information
-  extractInlineParseErrorLocationAndMessage(result.takeError(),
-                                            errorLine, errorCol, errorByteOffset,
-                                            errorMessageBuffer, errorMessageBufferCapacity);
-
-  return MlirOperation{nullptr};
 }
 
 

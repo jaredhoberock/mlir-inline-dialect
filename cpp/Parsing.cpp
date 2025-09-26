@@ -1,5 +1,6 @@
 #include "Parsing.hpp"
 #include <llvm/ADT/StringExtras.h>
+#include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Verifier.h>
 #include <llvm/Support/ConvertUTF.h>
 #include <mlir/Parser/Parser.h>
@@ -77,11 +78,11 @@ static std::optional<size_t> findByteOffsetOfLoc(llvm::StringRef buffer, unsigne
 }
 
 
-void adjustErrorLocationToAccountForPrelude(InlineRegionParseError &error,
-                                            MLIRContext* ctx,
-                                            StringRef fullSourceStr,
-                                            size_t numPreludeLines,
-                                            size_t numPreludeBytes) {
+static void adjustErrorLocationToAccountForPrelude(InlineRegionParseError &error,
+                                                   MLIRContext* ctx,
+                                                   StringRef fullSourceStr,
+                                                   size_t numPreludeLines,
+                                                   size_t numPreludeBytes) {
   if (auto fileLoc = dyn_cast<FileLineColLoc>(error.loc)) {
     unsigned line = fileLoc.getLine();
     unsigned col = fileLoc.getColumn();
@@ -110,6 +111,27 @@ void adjustErrorLocationToAccountForPrelude(InlineRegionParseError &error,
 }
 
 
+static std::pair<std::string, size_t> buildUccPrelude(
+    ArrayRef<StringRef> operandNames,
+    ValueRange operands) {
+  std::string prelude;
+  size_t preludeLineCount = 0;
+  for (size_t i = 0; i < operands.size(); ++i) {
+    std::string valueName = operandNames[i].str();
+    std::string typeStr;
+    llvm::raw_string_ostream os(typeStr);
+    operands[i].getType().print(os);
+    prelude += "%" + valueName +
+               " = \"builtin.unrealized_conversion_cast\"() "
+               "{inline.placeholder = " + std::to_string(i) + "} : () -> " +
+               typeStr + "\n";
+    ++preludeLineCount;
+  }
+  return {prelude, preludeLineCount};
+}
+
+
+// XXX do we even use this function?
 llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
     Location loc,
     ArrayRef<StringRef> operandNames,
@@ -128,27 +150,15 @@ llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
   // }
   //
   // We can't parse that directly because the parser won't recognize the operand names.
-  // So we need to prepend definitions to the source:
+  // So we need to prepend definitions to the source as a prelude:
   //
-  // %arg0 = builtin.unrealized_conversion_cast() { inline_placeholder = 0 } : () -> arg0_ty
-  // %arg1 = builtin.unrealized_conversion_cast() { inline_placeholder = 1 } : () -> arg1_ty
+  // %arg0 = builtin.unrealized_conversion_cast() { inline.placeholder = 0 } : () -> arg0_ty
+  // %arg1 = builtin.unrealized_conversion_cast() { inline.placeholder = 1 } : () -> arg1_ty
   // ...
   // inline.inline_region %arg0, %arg1, ...
 
   // create a prelude with placeholder values using the provided operand names
-  std::string prelude;
-  size_t preludeLineCount = 0;
-  for (size_t i = 0; i < operands.size(); ++i) {
-    std::string valueName = operandNames[i].str();
-    std::string typeStr;
-    llvm::raw_string_ostream os(typeStr);
-    operands[i].getType().print(os);
-
-    // create a placeholder SSA value with marker attribute
-    prelude += "%" + valueName + " = \"builtin.unrealized_conversion_cast\"() {inline_placeholder = " +
-      std::to_string(i) + "} : () -> " + typeStr + "\n";
-    ++preludeLineCount;
-  }
+  auto [prelude, preludeLineCount] = buildUccPrelude(operandNames, operands);
 
   // combine prelude with the original source string
   std::string fullStr = prelude + sourceString.str();
@@ -173,7 +183,7 @@ llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
 
   // replace placeholder values with operands
   for (Operation &op : block) {
-    if (auto attr = op.getAttrOfType<IntegerAttr>("inline_placeholder")) {
+    if (auto attr = op.getAttrOfType<IntegerAttr>("inline.placeholder")) {
       // extract the operand index
       int operand_idx = attr.getInt();
 
@@ -197,7 +207,7 @@ llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
 }
 
 
-LogicalResult verifyOperationsAndSymbolUses(Block::iterator opsBegin, Block::iterator opsEnd) {
+static LogicalResult verifyOperationsAndSymbolUses(Block::iterator opsBegin, Block::iterator opsEnd) {
   // first verify each operation individually
   for (auto op = opsBegin; op != opsEnd; ++op) {
     if (failed(verify(&*op))) {
@@ -219,84 +229,6 @@ LogicalResult verifyOperationsAndSymbolUses(Block::iterator opsBegin, Block::ite
 }
 
 
-// `%arg0, %arg1, ...`
-std::string buildOperandNamesString(ArrayRef<StringRef> names) {
-  // prepend '%' to every name
-  SmallVector<std::string> prefixed;
-  prefixed.reserve(names.size());
-  for (StringRef name : names)
-    prefixed.push_back(("%" + name).str());
-
-  return join(prefixed, ", ");
-}
-
-
-// `arg_ty0, arg_ty1, ...`
-std::string buildOperandTypesString(ValueRange values) {
-  std::string out;
-  llvm::raw_string_ostream os(out);
-
-  bool first = true;
-  for (Value v : values) {
-    if (!first)
-      os << ", ";
-    first = false;
-
-    v.getType().print(os);
-  }
-  os.flush();
-  return out;
-}
-
-
-std::string buildResultTypesString(TypeRange types) {
-  // if there are no results, return the empty string
-  if (types.empty())
-    return {};
-
-  std::string out;
-  llvm::raw_string_ostream os(out);
-
-  os << "-> ";
-
-  if (types.size() == 1) {
-    // if there is a single result, return "-> result_ty0"
-    types[0].print(os);
-  } else {
-    // otherwise, wrap in parens
-    os << "(";
-
-    bool first = true;
-    for (Type ty : types) {
-      if (!first)
-        os << ", ";
-      first = false;
-
-      ty.print(os);
-    }
-
-    os << ")";
-  }
-  os.flush();
-  return out;
-}
-
-
-std::pair<std::string,std::string> buildInlineRegionSourceStringSuffixAndPrefix(
-    ArrayRef<StringRef> operandNames,
-    ValueRange operands,
-    TypeRange resultTypes) {
-  std::string operandNamesStr = buildOperandNamesString(operandNames);
-  std::string operandTypesStr = buildOperandTypesString(operands);
-  std::string resultTypesStr = buildResultTypesString(resultTypes);
-
-  std::string prefixStr = "inline.inline_region " + operandNamesStr + " : (" + operandTypesStr + ") " + resultTypesStr + " { ";
-  std::string suffixStr = "}";
-
-  return std::make_pair(prefixStr, suffixStr);
-}
-
-
 llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
     Location loc,
     ArrayRef<StringRef> operandNames,
@@ -305,51 +237,74 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
     StringRef sourceString,
     Block *block) {
 
-  // wrap the source string into a full inline.inline_region operation
-  std::string prefixString, suffixString;
-  std::tie(prefixString, suffixString)
-    = buildInlineRegionSourceStringSuffixAndPrefix(operandNames, operands, resultTypes);
+  MLIRContext *ctx = loc->getContext();
 
-  std::string fullSourceString = prefixString + "\n" + std::string(sourceString) + "\n" + suffixString;
+  // build the prelude
+  auto [prelude, preludeLines] = buildUccPrelude(operandNames, operands);
+  std::string fullSource = prelude + sourceString.str();
 
-  // parse the inline.inline_region op
-  // don't verify the ops while parsing. we'll do that below once they're
-  // in the destination block
-  llvm::Expected<InlineRegionOp> maybeOp =
-    parseInlineRegionOpFromSourceString(loc, operandNames, operands,
-                                        fullSourceString, /*verifyAfterParse=*/false);
+  // parse the full source into a temporary block
+  Block tempBlock;
+  if (auto parseErr = invokeAndCaptureFirstError(ctx, [&] {
+        ParserConfig cfg(ctx, /*verifyAfterParse=*/false);
+        return parseSourceString(fullSource, &tempBlock, cfg);
+      })) {
 
-  // if there was an error, adjust error locations so that they point into the sourceString
-  // that was actually passed by the caller
-  if (!maybeOp) {
-    return llvm::handleErrors(maybeOp.takeError(), [&](InlineRegionParseError &error) {
-      adjustErrorLocationToAccountForPrelude(error,
-                                             loc.getContext(),
-                                             fullSourceString,
-                                             1, // the prefix is constructed to be exactly one line
-                                             prefixString.size());
-      return llvm::make_error<InlineRegionParseError>(std::move(error));
-    });
+    // remap diagnostics to the user string to account for the prelude
+    adjustErrorLocationToAccountForPrelude(*parseErr, ctx, fullSource,
+                                           preludeLines, prelude.size());
+    return llvm::make_error<InlineRegionParseError>(*parseErr);
   }
 
-  auto op = *maybeOp;
+  // collect UCC placeholders
+  SmallVector<Value> placeholderValues(operands.size(), Value());
+  for (auto op : tempBlock.getOps<UnrealizedConversionCastOp>()) {
+    if (auto idx = op->getAttrOfType<IntegerAttr>("inline.placeholder")) {
+      int i = idx.getInt();
+      if (i >= 0 && static_cast<size_t>(i) < operands.size())
+        placeholderValues[i] = op.getResult(0);
+    }
+  }
 
-  // insert the op at the end of the block
-  block->push_back(op);
-
-  // inline the body at the end of the block
-  OpBuilder builder(op->getContext());
+  // create a wrapping inline.inline_region op and its body
+  OpBuilder builder(ctx);
   builder.setInsertionPointToEnd(block);
+  auto inlineOp = builder.create<InlineRegionOp>(
+    loc,
+    /*inputs=*/operands,
+    /*resultTypes=*/resultTypes
+  );
 
+  Region &region = inlineOp.getRegion();
+  Block &body = region.front();
+
+  // replace uses of placeholder values with block arguments and erase their defining ops
+  for (auto [ph, arg] : llvm::zip(placeholderValues, body.getArguments())) {
+    if (ph) {
+      ph.replaceAllUsesWith(arg);
+      if (Operation *def = ph.getDefiningOp())
+        def->erase();
+    }
+  }
+
+  // move all remaining parsed ops into the region body
+  for (Operation &op : llvm::make_early_inc_range(tempBlock)) {
+    op.moveBefore(&body, body.end());
+  }
+
+  // ensure implicit terminator if missing
+  InlineRegionOp::ensureTerminator(inlineOp.getRegion(), builder, loc);
+
+  // inline the body at the end of the destination block
   SmallVector<Value> results;
-  std::string error;
-  if (failed(op.cloneBodyAtInsertionPoint(builder, op.getInputs(), results, error)))
-    return llvm::createStringError(llvm::inconvertibleErrorCode(), error);
+  std::string errorMsg;
+  if (failed(inlineOp.cloneBodyAtInsertionPoint(builder, inlineOp.getInputs(), results, errorMsg)))
+    return llvm::createStringError(llvm::inconvertibleErrorCode(), errorMsg);
 
-  auto newOpsBegin = std::next(Block::iterator(op));
+  auto newOpsBegin = std::next(Block::iterator(inlineOp));
 
   // erase the InlineRegionOp
-  op.erase();
+  inlineOp.erase();
 
   // verify the new ops
   auto verifyError = invokeAndCaptureFirstError(loc->getContext(), [&] {
