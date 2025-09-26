@@ -3,6 +3,7 @@
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Verifier.h>
 #include <llvm/Support/ConvertUTF.h>
+#include <llvm/Support/SourceMgr.h>
 #include <mlir/Parser/Parser.h>
 
 namespace mlir::inline_ {
@@ -131,82 +132,6 @@ static std::pair<std::string, size_t> buildUccPrelude(
 }
 
 
-// XXX do we even use this function?
-llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
-    Location loc,
-    ArrayRef<StringRef> operandNames,
-    ValueRange operands,
-    StringRef sourceString,
-    bool verifyAfterParse) {
-
-  if (operandNames.size() != operands.size()) {
-    llvm_unreachable("Internal compiler error: number of operand names doesn't match number of operands");
-  }
-
-  // we assume the source string is something like this:
-  //
-  // inline.inline_region %arg0, %arg1, ... : (arg0_ty, arg1_ty, ...) -> (result_tys...) {
-  //   <body>
-  // }
-  //
-  // We can't parse that directly because the parser won't recognize the operand names.
-  // So we need to prepend definitions to the source as a prelude:
-  //
-  // %arg0 = builtin.unrealized_conversion_cast() { inline.placeholder = 0 } : () -> arg0_ty
-  // %arg1 = builtin.unrealized_conversion_cast() { inline.placeholder = 1 } : () -> arg1_ty
-  // ...
-  // inline.inline_region %arg0, %arg1, ...
-
-  // create a prelude with placeholder values using the provided operand names
-  auto [prelude, preludeLineCount] = buildUccPrelude(operandNames, operands);
-
-  // combine prelude with the original source string
-  std::string fullStr = prelude + sourceString.str();
-
-  // create a temporary Block and parse these operations into it
-  MLIRContext* ctx = loc->getContext();
-  Block block;
-  auto error = invokeAndCaptureFirstError(ctx, [&] {
-    ParserConfig config(ctx, verifyAfterParse);
-    return parseSourceString(fullStr, &block, config);
-  });
-
-  // if there was an error, adjust the error location
-  // to account for the prelude
-  if (error) {
-    adjustErrorLocationToAccountForPrelude(*error,
-                                           ctx,
-                                           fullStr,
-                                           preludeLineCount, prelude.size());
-    return llvm::make_error<InlineRegionParseError>(*error);
-  }
-
-  // replace placeholder values with operands
-  for (Operation &op : block) {
-    if (auto attr = op.getAttrOfType<IntegerAttr>("inline.placeholder")) {
-      // extract the operand index
-      int operand_idx = attr.getInt();
-
-      // replace uses with the corresponding block argument
-      if (operand_idx >= 0 && operand_idx < operands.size()) {
-        op.getResult(0).replaceAllUsesWith(operands[operand_idx]);
-      }
-    }
-  }
-
-  // pick out the InlineRegionOp of interest
-  for (Operation &op : block) {
-    if (auto inline_region_op = dyn_cast<InlineRegionOp>(op)) {
-      // remove the InlineRegionOp from its parent Block
-      inline_region_op->remove();
-      return inline_region_op;
-    }
-  }
-
-  llvm_unreachable("Internal compiler error: no InlineRegionOp found in successfully parsed source");
-}
-
-
 static LogicalResult verifyOperationsAndSymbolUses(Block::iterator opsBegin, Block::iterator opsEnd) {
   // first verify each operation individually
   for (auto op = opsBegin; op != opsEnd; ++op) {
@@ -249,7 +174,6 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
         ParserConfig cfg(ctx, /*verifyAfterParse=*/false);
         return parseSourceString(fullSource, &tempBlock, cfg);
       })) {
-
     // remap diagnostics to the user string to account for the prelude
     adjustErrorLocationToAccountForPrelude(*parseErr, ctx, fullSource,
                                            preludeLines, prelude.size());

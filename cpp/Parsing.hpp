@@ -42,13 +42,6 @@ struct InlineRegionParseError : public llvm::ErrorInfo<InlineRegionParseError> {
   }
 };
 
-llvm::Expected<InlineRegionOp> parseInlineRegionOpFromSourceString(
-    Location loc,
-    ArrayRef<StringRef> operandNames,
-    ValueRange operands,
-    StringRef sourceString,
-    bool verifyAfterParse = true);
-
 llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
     Location loc,
     ArrayRef<StringRef> operandNames,
