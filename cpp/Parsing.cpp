@@ -112,11 +112,23 @@ static void adjustErrorLocationToAccountForPrelude(InlineRegionParseError &error
 }
 
 
-static std::pair<std::string, size_t> buildUccPrelude(
-    ArrayRef<StringRef> operandNames,
-    ValueRange operands) {
+static std::pair<std::string, size_t> buildUccPrelude(ArrayRef<StringRef> operandNames,
+                                                      ValueRange operands,
+                                                      ArrayRef<StringRef> typeAliasNames,
+                                                      TypeRange typeAliasTypes) {
   std::string prelude;
   size_t preludeLineCount = 0;
+
+  // emit type aliases first
+  for (size_t i = 0; i < typeAliasNames.size(); ++i) {
+    std::string typeStr;
+    llvm::raw_string_ostream os(typeStr);
+    typeAliasTypes[i].print(os);
+    prelude += "!" + typeAliasNames[i].str() + " = " + typeStr + "\n";
+    ++preludeLineCount;
+  }
+
+  // then operand placeholders
   for (size_t i = 0; i < operands.size(); ++i) {
     std::string valueName = operandNames[i].str();
     std::string typeStr;
@@ -158,6 +170,8 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
     Location loc,
     ArrayRef<StringRef> operandNames,
     ValueRange operands,
+    ArrayRef<StringRef> typeAliasNames,
+    TypeRange typeAliasTypes,
     TypeRange resultTypes,
     StringRef sourceString,
     Block *block) {
@@ -165,7 +179,11 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
   MLIRContext *ctx = loc->getContext();
 
   // build the prelude
-  auto [prelude, preludeLines] = buildUccPrelude(operandNames, operands);
+  auto [prelude, preludeLines] = buildUccPrelude(
+      operandNames,
+      operands,
+      typeAliasNames,
+      typeAliasTypes);
   std::string fullSource = prelude + sourceString.str();
 
   // parse the full source into a temporary block

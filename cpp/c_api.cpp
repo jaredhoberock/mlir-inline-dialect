@@ -73,6 +73,9 @@ InlineValueList inlineParseSourceStringIntoBlock(
     MlirStringRef* wrappedOperandNames,
     MlirValue* wrappedOperands,
     intptr_t numOperands,
+    MlirStringRef* wrappedTypeAliasNames,
+    MlirType* wrappedTypeAliasTypes,
+    intptr_t numTypeAliases,
     MlirType* wrappedResultTypes,
     intptr_t numResultTypes,
     MlirStringRef wrappedSourceString,
@@ -92,12 +95,20 @@ InlineValueList inlineParseSourceStringIntoBlock(
   Location loc = unwrap(wrappedLoc);
   Block* block = unwrap(wrappedBlock);
 
-  // unwrap inputs
+  // unwrap operands
   SmallVector<StringRef,4> operandNames;
   SmallVector<Value,4> operandValues;
   for (intptr_t i = 0; i < numOperands; ++i) {
     operandNames.push_back(StringRef(wrappedOperandNames[i].data, wrappedOperandNames[i].length));
     operandValues.push_back(unwrap(wrappedOperands[i]));
+  }
+
+  // unwrap type aliases
+  SmallVector<StringRef,4> typeAliasNames;
+  SmallVector<Type,4> typeAliasTypes;
+  for (intptr_t i = 0; i < numTypeAliases; ++i) {
+    typeAliasNames.push_back(StringRef(wrappedTypeAliasNames[i].data, wrappedTypeAliasNames[i].length));
+    typeAliasTypes.push_back(unwrap(wrappedTypeAliasTypes[i]));
   }
 
   // wrap result types
@@ -110,7 +121,9 @@ InlineValueList inlineParseSourceStringIntoBlock(
 
   // call C++
   llvm::Expected<SmallVector<Value>> result =
-    parseSourceStringIntoBlock(loc, operandNames, operandValues, resultTypes, sourceString, block);
+    parseSourceStringIntoBlock(loc, operandNames, operandValues,
+                               typeAliasNames, typeAliasTypes,
+                               resultTypes, sourceString, block);
 
   // handle error case
   if (!result) {

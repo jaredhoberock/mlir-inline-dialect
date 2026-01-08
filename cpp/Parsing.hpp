@@ -46,6 +46,8 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
     Location loc,
     ArrayRef<StringRef> operandNames,
     ValueRange operands,
+    ArrayRef<StringRef> typeAliasNames,
+    TypeRange typeAliasTypes,
     TypeRange resultTypes,
     StringRef sourceString,
     Block *block);

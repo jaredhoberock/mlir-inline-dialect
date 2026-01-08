@@ -25,6 +25,9 @@ unsafe extern "C" {
         operand_names: *const MlirStringRef,
         operand_value: *const MlirValue,
         num_operands: isize,
+        type_alias_names: *const MlirStringRef,
+        type_alias_types: *const MlirType,
+        num_type_aliases: isize,
         result_types: *const MlirType,
         num_result_types: isize,
         source_string: MlirStringRef,
@@ -85,14 +88,20 @@ pub fn yield_<'c>(loc: Location<'c>, results: &[Value<'c,'_>]) -> Operation<'c> 
 pub fn parse_source_into_block<'c,'b>(
     loc: Location<'c>,
     operands: &[(StringRef, Value<'c,'_>)],
+    type_aliases: &[(StringRef, Type<'c>)],
     result_types: &[Type<'c>],
     src_str: StringRef,
     block: &'b Block<'c>,
 ) -> Result<Vec<Value<'c,'b>>, Error> {
     unsafe {
-        let (names, values): (Vec<_>, Vec<_>) = operands.iter()
+        let (operand_names, operand_values): (Vec<_>, Vec<_>) = operands.iter()
             .map(|(n, v)| (n.to_raw(), v.to_raw()))
             .unzip();
+
+        let (alias_names, alias_types): (Vec<_>, Vec<_>) = type_aliases.iter()
+            .map(|(n, t)| (n.to_raw(), t.to_raw()))
+            .unzip();
+        
         let results: Vec<_> = result_types.iter()
             .map(|ty| ty.to_raw())
             .collect();
@@ -106,9 +115,12 @@ pub fn parse_source_into_block<'c,'b>(
 
         let result = inlineParseSourceStringIntoBlock(
             loc.to_raw(),
-            names.as_ptr(),
-            values.as_ptr(),
+            operand_names.as_ptr(),
+            operand_values.as_ptr(),
             operands.len() as isize,
+            alias_names.as_ptr(),
+            alias_types.as_ptr(),
+            type_aliases.len() as isize,
             results.as_ptr(),
             results.len() as isize,
             src_str.to_raw(),
