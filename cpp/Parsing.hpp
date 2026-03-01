@@ -50,6 +50,7 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
     TypeRange typeAliasTypes,
     TypeRange resultTypes,
     StringRef sourceString,
-    Block *block);
+    Block *block,
+    bool verifyAfterParse = true);
 
 }

@@ -32,6 +32,7 @@ unsafe extern "C" {
         num_result_types: isize,
         source_string: MlirStringRef,
         block: MlirBlock,
+        verify_after_parse: bool,
         error_line: *mut usize,
         error_column: *mut usize,
         error_byte_offset: *mut usize,
@@ -92,6 +93,7 @@ pub fn parse_source_into_block<'c,'b>(
     result_types: &[Type<'c>],
     src_str: StringRef,
     block: &'b Block<'c>,
+    verify_after_parse: bool,
 ) -> Result<Vec<Value<'c,'b>>, Error> {
     unsafe {
         let (operand_names, operand_values): (Vec<_>, Vec<_>) = operands.iter()
@@ -125,6 +127,7 @@ pub fn parse_source_into_block<'c,'b>(
             results.len() as isize,
             src_str.to_raw(),
             block.to_raw(),
+            verify_after_parse,
             &mut error_line as *mut usize,
             &mut error_column as *mut usize,
             &mut error_byte_offset as *mut usize,

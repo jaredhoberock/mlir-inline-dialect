@@ -80,6 +80,7 @@ InlineValueList inlineParseSourceStringIntoBlock(
     intptr_t numResultTypes,
     MlirStringRef wrappedSourceString,
     MlirBlock wrappedBlock,
+    bool verifyAfterParse,
     size_t* errorLine,
     size_t* errorCol,
     size_t* errorByteOffset,
@@ -123,7 +124,8 @@ InlineValueList inlineParseSourceStringIntoBlock(
   llvm::Expected<SmallVector<Value>> result =
     parseSourceStringIntoBlock(loc, operandNames, operandValues,
                                typeAliasNames, typeAliasTypes,
-                               resultTypes, sourceString, block);
+                               resultTypes, sourceString, block,
+                               verifyAfterParse);
 
   // handle error case
   if (!result) {

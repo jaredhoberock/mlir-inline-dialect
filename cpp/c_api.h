@@ -39,6 +39,7 @@ InlineValueList inlineParseSourceStringIntoBlock(
     intptr_t numResultTypes,
     MlirStringRef sourceString,
     MlirBlock block,
+    bool verifyAfterParse,
     size_t* errorLine,
     size_t* errorCol,
     size_t* errorByteOffset,

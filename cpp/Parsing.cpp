@@ -174,7 +174,8 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
     TypeRange typeAliasTypes,
     TypeRange resultTypes,
     StringRef sourceString,
-    Block *block) {
+    Block *block,
+    bool verifyAfterParse) {
 
   MLIRContext *ctx = loc->getContext();
 
@@ -248,14 +249,15 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
   // erase the InlineRegionOp
   inlineOp.erase();
 
-  // verify the new ops
-  auto verifyError = invokeAndCaptureFirstError(loc->getContext(), [&] {
-    return verifyOperationsAndSymbolUses(newOpsBegin, block->end());
-  });
+  // optionally verify the new ops
+  if (verifyAfterParse) {
+    auto verifyError = invokeAndCaptureFirstError(loc->getContext(), [&] {
+      return verifyOperationsAndSymbolUses(newOpsBegin, block->end());
+    });
 
-  // check for a verification error
-  if (verifyError)
-    return llvm::make_error<InlineRegionParseError>(*verifyError);
+    if (verifyError)
+      return llvm::make_error<InlineRegionParseError>(*verifyError);
+  }
 
   // success; return the results
   return results;
