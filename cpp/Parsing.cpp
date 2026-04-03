@@ -244,6 +244,13 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
   if (failed(inlineOp.cloneBodyAtInsertionPoint(builder, inlineOp.getInputs(), results, errorMsg)))
     return llvm::createStringError(llvm::inconvertibleErrorCode(), errorMsg);
 
+  if (results.size() != resultTypes.size()) {
+    std::string msg = ("inline asm yields " + Twine(results.size()) +
+        " values but " + Twine(resultTypes.size()) + " expected").str();
+    inlineOp.erase();
+    return llvm::make_error<InlineRegionParseError>(msg, loc, std::nullopt);
+  }
+
   auto newOpsBegin = std::next(Block::iterator(inlineOp));
 
   // erase the InlineRegionOp
