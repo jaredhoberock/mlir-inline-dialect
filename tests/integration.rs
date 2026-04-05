@@ -6,6 +6,7 @@ use melior::{
         attribute::{StringAttribute, TypeAttribute},
         Attribute,
         r#type::{FunctionType, IntegerType},
+        operation::{OperationLike, OperationMutLike},
         Block, BlockLike, Location, Module, Region, RegionLike,
     },
     pass::{self, PassManager},
@@ -108,7 +109,7 @@ fn test_inline_jit() {
     assert!(pass_manager.run(&mut module).is_ok());
 
     // JIT compile the module
-    let engine = ExecutionEngine::new(&module, 0, &[], false);
+    let engine = ExecutionEngine::new(&module, 0, &[], false, false);
 
     // test that we can call the function and it produces the expected result
     unsafe {

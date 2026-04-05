@@ -212,7 +212,7 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
   // create a wrapping inline.inline_region op and its body
   OpBuilder builder(ctx);
   builder.setInsertionPointToEnd(block);
-  auto inlineOp = builder.create<InlineRegionOp>(
+  auto inlineOp = InlineRegionOp::create(builder, 
     loc,
     /*inputs=*/operands,
     /*resultTypes=*/resultTypes
