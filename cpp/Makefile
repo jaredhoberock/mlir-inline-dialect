@@ -52,7 +52,7 @@ libinline_dialect.so: $(PLUGIN_OBJECTS)
 .PHONY: test
 test: libinline_dialect.so
 	@echo "Running inline dialect tests..."
-	./venv/bin/lit tests
+	lit tests
 
 clean:
 	rm -f *.o *.inc *.a *.so
