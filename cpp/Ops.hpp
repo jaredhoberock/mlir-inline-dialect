@@ -6,4 +6,4 @@
 #include <mlir/IR/OpDefinition.h>
 
 #define GET_OP_CLASSES
-#include "Ops.hpp.inc"
+#include <Ops.hpp.inc>

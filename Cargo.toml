@@ -2,6 +2,7 @@
 name = "mlir-inline-dialect"
 version = "0.1.0"
 edition = "2024"
+links = "inline_dialect"
 
 [dependencies]
 melior = "0.27"

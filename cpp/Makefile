@@ -2,61 +2,56 @@ ifndef MLIR_SYS_220_PREFIX
 $(error MLIR_SYS_220_PREFIX must be set; point it at your LLVM/MLIR 22 install)
 endif
 
+BUILD_DIR := build
 LLVM_BIN_PATH := $(MLIR_SYS_220_PREFIX)/bin
-
 LLVM_CONFIG := $(LLVM_BIN_PATH)/llvm-config
 TBLGEN := $(LLVM_BIN_PATH)/mlir-tblgen
-OPT := $(LLVM_BIN_PATH)/mlir-opt
 
-# Compiler flags
 CXX := clang++
-CXXFLAGS := -Wall -Werror -g -fPIC `$(LLVM_CONFIG) --cxxflags`
+CXXFLAGS := -Wall -Werror -fPIC $(shell $(LLVM_CONFIG) --cxxflags)
+INCLUDES := -I$(BUILD_DIR) -I. -I$(MLIR_SYS_220_PREFIX)/include
 
-# LLVM/MLIR libraries
-MLIR_INCLUDE := $(MLIR_SYS_220_PREFIX)/include
-
-INCLUDES := -I $(MLIR_INCLUDE)
-
-# Dialect library sources
 DIALECT_SOURCES := c_api.cpp Dialect.cpp Lowering.cpp Ops.cpp Parsing.cpp
-DIALECT_OBJECTS := $(DIALECT_SOURCES:.cpp=.o)
+DIALECT_OBJECTS := $(addprefix $(BUILD_DIR)/,$(DIALECT_SOURCES:.cpp=.o))
+PLUGIN_OBJECTS := $(DIALECT_OBJECTS) $(BUILD_DIR)/Plugin.o
+TD_FILES := $(wildcard *.td)
 
-# Generated files
-GENERATED := Dialect.hpp.inc Dialect.cpp.inc Ops.hpp.inc Ops.cpp.inc
+GENERATED := \
+  $(BUILD_DIR)/Dialect.hpp.inc \
+  $(BUILD_DIR)/Dialect.cpp.inc \
+  $(BUILD_DIR)/Ops.hpp.inc \
+  $(BUILD_DIR)/Ops.cpp.inc
 
-.PHONY: all clean
+.PHONY: all clean test
 
-all: libinline_dialect.a libinline_dialect.so
+all: $(BUILD_DIR)/libinline_dialect.a $(BUILD_DIR)/libinline_dialect.so
 
-# TableGen rules
-Dialect.hpp.inc: Dialect.td
+$(BUILD_DIR):
+	mkdir -p $@
+
+$(BUILD_DIR)/Dialect.hpp.inc: Dialect.td $(TD_FILES) | $(BUILD_DIR)
 	$(TBLGEN) --gen-dialect-decls $(INCLUDES) $< -o $@
 
-Dialect.cpp.inc: Dialect.td
+$(BUILD_DIR)/Dialect.cpp.inc: Dialect.td $(TD_FILES) | $(BUILD_DIR)
 	$(TBLGEN) --gen-dialect-defs $(INCLUDES) $< -o $@
 
-Ops.hpp.inc: Ops.td
+$(BUILD_DIR)/Ops.hpp.inc: Ops.td $(TD_FILES) | $(BUILD_DIR)
 	$(TBLGEN) --gen-op-decls $(INCLUDES) $< -o $@
 
-Ops.cpp.inc: Ops.td
+$(BUILD_DIR)/Ops.cpp.inc: Ops.td $(TD_FILES) | $(BUILD_DIR)
 	$(TBLGEN) --gen-op-defs $(INCLUDES) $< -o $@
 
-# Object file rules
-%.o: %.cpp $(GENERATED)
+$(BUILD_DIR)/%.o: %.cpp $(GENERATED) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
-libinline_dialect.a: $(DIALECT_OBJECTS)
+$(BUILD_DIR)/libinline_dialect.a: $(DIALECT_OBJECTS)
 	ar rcs $@ $^
 
-PLUGIN_OBJECTS := $(DIALECT_OBJECTS) Plugin.o
-
-libinline_dialect.so: $(PLUGIN_OBJECTS)
+$(BUILD_DIR)/libinline_dialect.so: $(PLUGIN_OBJECTS)
 	$(CXX) -shared $^ -o $@
 
-.PHONY: test
-test: libinline_dialect.so
-	@echo "Running inline dialect tests..."
-	lit tests
+test: $(BUILD_DIR)/libinline_dialect.so
+	INLINE_DIALECT_PLUGIN=$(CURDIR)/$(BUILD_DIR)/libinline_dialect.so lit tests
 
 clean:
-	rm -f *.o *.inc *.a *.so
+	rm -rf $(BUILD_DIR)
