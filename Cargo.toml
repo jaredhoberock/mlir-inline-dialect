@@ -10,9 +10,13 @@ mlir-sys = "230.0.2"
 thiserror = "1"
 libc = "0.2"
 
+[build-dependencies]
+build-support = { git = "ssh://git@github.com/jaredhoberock/mlir-lowering-driver.git", package = "build-support" }
+
 [lib]
 name = "inline_dialect"
 path = "src/lib.rs"
 
 [dev-dependencies]
+build-support = { git = "ssh://git@github.com/jaredhoberock/mlir-lowering-driver.git", package = "build-support" }
 tempfile = "3"
