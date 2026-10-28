@@ -1,189 +1,90 @@
 #include "Parsing.hpp"
-#include <llvm/ADT/StringExtras.h>
+#include <mlir/IR/AttrTypeSubElements.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Verifier.h>
-#include <llvm/Support/ConvertUTF.h>
-#include <llvm/Support/SourceMgr.h>
 #include <mlir/Parser/Parser.h>
 
 namespace mlir::inline_ {
 
 char InlineRegionParseError::ID = 0;
 
-static std::optional<InlineRegionParseError> invokeAndCaptureFirstError(
-    MLIRContext *context, 
-    std::function<LogicalResult()> f) {
-
-  std::optional<InlineRegionParseError> captured;
-
-  // create a diagnostic handler that writes to our string
-  ScopedDiagnosticHandler handler(context, [&](Diagnostic &diag) {
-    // only capture first error and ignore things that aren't errors
-    if (captured || diag.getSeverity() != DiagnosticSeverity::Error)
-    if (captured.has_value())
-      return success();
-
-    std::string message;
-    llvm::raw_string_ostream os(message);
-    os << diag.str(); // this omits the location prefix
-    os.flush();
-
-    captured = InlineRegionParseError(message, diag.getLocation(), std::nullopt);
-    return success();
-  });
-
-  // invoke the function and ignore the result
-  // we assume that if f produced failure(), then captured has an error in it
-  if (failed(f())) {
-    // presumably captured has an error inside it
-    // assert(captured.has_value());
-  }
-
-  return captured;
-}
-
-static std::optional<size_t> findByteOffsetOfLoc(llvm::StringRef buffer, unsigned targetLine, unsigned targetCol) {
-  if (targetLine == 0 || targetCol == 0)
-    return std::nullopt;
-
-  size_t byteOffset = 0;
-  unsigned curLine = 1;
-
-  // Move to start of target line
-  while (curLine < targetLine) {
-    size_t newlinePos = buffer.find('\n');
-    if (newlinePos == llvm::StringRef::npos)
-      return std::nullopt;
-    byteOffset += newlinePos + 1;
-    buffer = buffer.drop_front(newlinePos + 1);
-    ++curLine;
-  }
-
-  // Now buffer starts at target line; walk characters to compute byte offset of column
-  llvm::StringRef lineText = buffer.take_until([](char c) { return c == '\n'; });
-  size_t colOffset = 0;
-  unsigned charCount = 0;
-
-  for (auto it = lineText.begin(); it != lineText.end(); ) {
-    if (charCount == targetCol - 1)
-      break;
-    unsigned charLen = llvm::getNumBytesForUTF8(*it);
-    if (charLen == 0 || std::distance(it, lineText.end()) < charLen)
-      return std::nullopt;
-    it += charLen;
-    colOffset += charLen;
-    ++charCount;
-  }
-
-  return byteOffset + colOffset;
-}
-
-
-// The name of the buffer the parser reads: the prelude's lines, then the
-// caller's text from the start of a line.
+// The name of the buffer the parser reads: the prelude, then the caller's text
+// from the start of a line.
 static constexpr llvm::StringLiteral bufferName = "inline-text";
 
-// The position, in the coordinates `textStart` sets, of `parsed`, a position
-// in the parser's buffer. `textStart` is the position of the text's first
-// character: the text's first line continues that line, and each later text
-// line starts at column 1 of a following line, which holds when the text
-// appears verbatim, one line for each of its lines. A position inside the
-// prelude, or a `textStart` that is no file position, yields `textStart`.
-static Location positionOfParsedLoc(FileLineColLoc parsed, size_t preludeLines,
-                                    Location textStart) {
-  auto start = dyn_cast<FileLineColRange>(textStart);
-  if (!start || parsed.getLine() <= preludeLines)
-    return textStart;
-  unsigned textLine = parsed.getLine() - preludeLines;
-  unsigned column = textLine == 1
-      ? parsed.getColumn() + start.getStartColumn() - 1
-      : parsed.getColumn();
-  return FileLineColLoc::get(start.getFilename(),
-                             start.getStartLine() + textLine - 1, column);
-}
-
-
-static void adjustErrorLocationToAccountForPrelude(InlineRegionParseError &error,
-                                                   MLIRContext* ctx,
-                                                   StringRef fullSourceStr,
-                                                   size_t numPreludeLines,
-                                                   size_t numPreludeBytes) {
-  if (auto fileLoc = dyn_cast<FileLineColLoc>(error.loc)) {
-    unsigned line = fileLoc.getLine();
-    unsigned col = fileLoc.getColumn();
-    auto byteOffset = findByteOffsetOfLoc(fullSourceStr, line, col);
-
-    // report the position relative to the text, whose first character is at
-    // line 1, column 1
-    error.loc = positionOfParsedLoc(
-        fileLoc, numPreludeLines,
-        FileLineColLoc::get(ctx, fileLoc.getFilename(), 1, 1));
-
-    // adjust byte offset if it was found
-    if (line > numPreludeLines && byteOffset && *byteOffset >= numPreludeBytes) {
-      // location is within the user's code
-      error.byteOffset = *byteOffset - numPreludeBytes;
-    } else {
-      // location is within the prelude
-      error.byteOffset = std::nullopt;
-    }
-  }
-}
-
-
-static std::pair<std::string, size_t> buildUccPrelude(ArrayRef<StringRef> operandNames,
-                                                      ValueRange operands,
-                                                      ArrayRef<StringRef> typeAliasNames,
-                                                      TypeRange typeAliasTypes) {
+// The prelude binds each type alias name to its type and each operand name to
+// a placeholder of the operand's type, one line each. The placeholders are the
+// first ops the buffer parses to, in operand order.
+static std::string buildPrelude(ArrayRef<StringRef> operandNames,
+                                ValueRange operands,
+                                ArrayRef<StringRef> typeAliasNames,
+                                TypeRange typeAliasTypes) {
   std::string prelude;
-  size_t preludeLineCount = 0;
-
-  // emit type aliases first
-  for (size_t i = 0; i < typeAliasNames.size(); ++i) {
-    std::string typeStr;
-    llvm::raw_string_ostream os(typeStr);
-    typeAliasTypes[i].print(os);
-    prelude += "!" + typeAliasNames[i].str() + " = " + typeStr + "\n";
-    ++preludeLineCount;
-  }
-
-  // then operand placeholders
-  for (size_t i = 0; i < operands.size(); ++i) {
-    std::string valueName = operandNames[i].str();
-    std::string typeStr;
-    llvm::raw_string_ostream os(typeStr);
-    operands[i].getType().print(os);
-    prelude += "%" + valueName +
-               " = \"builtin.unrealized_conversion_cast\"() "
-               "{inline.placeholder = " + std::to_string(i) + "} : () -> " +
-               typeStr + "\n";
-    ++preludeLineCount;
-  }
-  return {prelude, preludeLineCount};
+  llvm::raw_string_ostream os(prelude);
+  for (auto [name, type] : llvm::zip_equal(typeAliasNames, typeAliasTypes))
+    os << "!" << name << " = " << type << "\n";
+  for (auto [name, operand] : llvm::zip_equal(operandNames, operands))
+    os << "%" << name << " = \"builtin.unrealized_conversion_cast\"() : () -> "
+       << operand.getType() << "\n";
+  return prelude;
 }
 
+// The line and column within the caller's text of `parsed`, a position in the
+// parser's buffer, or nullopt when it lies in the prelude's `preludeLines`.
+static std::optional<std::pair<unsigned, unsigned>>
+textPosition(FileLineColLoc parsed, size_t preludeLines) {
+  if (parsed.getLine() <= preludeLines)
+    return std::nullopt;
+  return std::make_pair(unsigned(parsed.getLine() - preludeLines),
+                        parsed.getColumn());
+}
 
-static LogicalResult verifyOperationsAndSymbolUses(Block::iterator opsBegin, Block::iterator opsEnd) {
-  // first verify each operation individually
-  for (auto op = opsBegin; op != opsEnd; ++op) {
-    if (failed(verify(&*op))) {
+// The byte offset into `text` of its (line, column), or nullopt when the text
+// has no such position.
+static std::optional<size_t> byteOffsetIn(StringRef text, unsigned line,
+                                          unsigned column) {
+  size_t lineStart = 0;
+  for (unsigned i = 1; i < line; ++i) {
+    lineStart = text.find('\n', lineStart);
+    if (lineStart == StringRef::npos)
+      return std::nullopt;
+    ++lineStart;
+  }
+  size_t offset = lineStart + column - 1;
+  if (offset > text.size())
+    return std::nullopt;
+  return offset;
+}
+
+// Runs `f` and returns the first error it reports through `context`'s
+// diagnostics, as its message and location.
+static std::optional<std::pair<std::string, Location>>
+firstError(MLIRContext *context, llvm::function_ref<LogicalResult()> f) {
+  std::optional<std::pair<std::string, Location>> first;
+  ScopedDiagnosticHandler handler(context, [&](Diagnostic &diag) {
+    if (!first && diag.getSeverity() == DiagnosticSeverity::Error)
+      first.emplace(diag.str(), diag.getLocation());
+    return success();
+  });
+  if (succeeded(f()))
+    return std::nullopt;
+  return first;
+}
+
+static LogicalResult verifyOperationsAndSymbolUses(Block::iterator opsBegin,
+                                                   Block::iterator opsEnd) {
+  for (Operation &op : llvm::make_range(opsBegin, opsEnd))
+    if (failed(verify(&op)))
       return failure();
-    }
-  }
-  
-  // now verify symbol uses across all operations
+
   SymbolTableCollection symbolTable;
-  for (auto op = opsBegin; op != opsEnd; ++op) {
-    if (auto symbolUser = dyn_cast<SymbolUserOpInterface>(*op)) {
-      if (failed(symbolUser.verifySymbolUses(symbolTable))) {
+  for (Operation &op : llvm::make_range(opsBegin, opsEnd))
+    if (auto symbolUser = dyn_cast<SymbolUserOpInterface>(op))
+      if (failed(symbolUser.verifySymbolUses(symbolTable)))
         return failure();
-      }
-    }
-  }
 
   return success();
 }
-
 
 llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
     Location loc,
@@ -195,111 +96,87 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
     StringRef sourceString,
     Block *block,
     bool verifyAfterParse) {
-
   MLIRContext *ctx = loc->getContext();
+  auto failure = [](std::string message,
+                    std::optional<TextPosition> position = std::nullopt) {
+    return llvm::make_error<InlineRegionParseError>(std::move(message), position);
+  };
 
-  // build the prelude
-  auto [prelude, preludeLines] = buildUccPrelude(
-      operandNames,
-      operands,
-      typeAliasNames,
-      typeAliasTypes);
-  std::string fullSource = prelude + sourceString.str();
+  std::string prelude = buildPrelude(operandNames, operands, typeAliasNames,
+                                     typeAliasTypes);
+  size_t preludeLines = llvm::count(prelude, '\n');
+  std::string buffer = prelude + sourceString.str();
 
-  // parse the full source into a temporary block
-  Block tempBlock;
-  if (auto parseErr = invokeAndCaptureFirstError(ctx, [&] {
-        ParserConfig cfg(ctx, /*verifyAfterParse=*/false);
-        return parseSourceString(fullSource, &tempBlock, cfg, bufferName);
+  Block parsed;
+  if (auto error = firstError(ctx, [&] {
+        ParserConfig config(ctx, /*verifyAfterParse=*/false);
+        return parseSourceString(buffer, &parsed, config, bufferName);
       })) {
-    // remap diagnostics to the user string to account for the prelude
-    adjustErrorLocationToAccountForPrelude(*parseErr, ctx, fullSource,
-                                           preludeLines, prelude.size());
-    return llvm::make_error<InlineRegionParseError>(*parseErr);
+    // a parse error reports its position relative to the text
+    std::optional<TextPosition> position;
+    if (auto at = dyn_cast<FileLineColLoc>(error->second))
+      if (auto lineColumn = textPosition(at, preludeLines)) {
+        auto [line, column] = *lineColumn;
+        if (auto offset = byteOffsetIn(sourceString, line, column))
+          position = TextPosition{line, column, *offset};
+      }
+    return failure(error->first, position);
   }
 
   // every op and block argument the parser placed in its buffer takes its
-  // position in the caller's file
+  // position in the caller's file: the text's first line continues `loc`'s
+  // line, and each later text line starts at column 1 of a following line,
+  // which holds when the text appears there verbatim
   AttrTypeReplacer relocator;
-  relocator.addReplacement([&, preludeLines = preludeLines](FileLineColLoc parsed) -> std::optional<Attribute> {
-    if (parsed.getFilename() != bufferName)
+  relocator.addReplacement([&](FileLineColLoc at) -> std::optional<Attribute> {
+    if (at.getFilename() != bufferName)
       return std::nullopt;
-    return positionOfParsedLoc(parsed, preludeLines, loc);
+    auto start = dyn_cast<FileLineColRange>(loc);
+    auto lineColumn = textPosition(at, preludeLines);
+    if (!start || !lineColumn)
+      return loc;
+    auto [line, column] = *lineColumn;
+    return FileLineColLoc::get(
+        start.getFilename(), start.getStartLine() + line - 1,
+        line == 1 ? column + start.getStartColumn() - 1 : column);
   });
-  for (Operation &op : tempBlock)
+  for (Operation &op : parsed)
     relocator.recursivelyReplaceElementsIn(&op, /*replaceAttrs=*/false,
                                            /*replaceLocs=*/true);
 
-  // collect UCC placeholders
-  SmallVector<Value> placeholderValues(operands.size(), Value());
-  for (auto op : tempBlock.getOps<UnrealizedConversionCastOp>()) {
-    if (auto idx = op->getAttrOfType<IntegerAttr>("inline.placeholder")) {
-      int i = idx.getInt();
-      if (i >= 0 && static_cast<size_t>(i) < operands.size())
-        placeholderValues[i] = op.getResult(0);
-    }
+  // the placeholders stand for the operands
+  for (Value operand : operands) {
+    Operation &placeholder = parsed.front();
+    placeholder.getResult(0).replaceAllUsesWith(operand);
+    placeholder.erase();
   }
 
-  // create a wrapping inline.inline_region op and its body
-  OpBuilder builder(ctx);
-  builder.setInsertionPointToEnd(block);
-  auto inlineOp = InlineRegionOp::create(builder, 
-    loc,
-    /*inputs=*/operands,
-    /*resultTypes=*/resultTypes
-  );
-
-  Region &region = inlineOp.getRegion();
-  Block &body = region.front();
-
-  // replace uses of placeholder values with block arguments and erase their defining ops
-  for (auto [ph, arg] : llvm::zip(placeholderValues, body.getArguments())) {
-    if (ph) {
-      ph.replaceAllUsesWith(arg);
-      if (Operation *def = ph.getDefiningOp())
-        def->erase();
-    }
-  }
-
-  // move all remaining parsed ops into the region body
-  for (Operation &op : llvm::make_early_inc_range(tempBlock)) {
-    op.moveBefore(&body, body.end());
-  }
-
-  // ensure implicit terminator if missing
-  InlineRegionOp::ensureTerminator(inlineOp.getRegion(), builder, loc);
-
-  // inline the body at the end of the destination block
+  // a trailing terminator is the text's inline.yield, whose operands are the
+  // text's results
   SmallVector<Value> results;
-  std::string errorMsg;
-  if (failed(inlineOp.cloneBodyAtInsertionPoint(builder, inlineOp.getInputs(), results, errorMsg)))
-    return llvm::createStringError(llvm::inconvertibleErrorCode(), errorMsg);
-
-  if (results.size() != resultTypes.size()) {
-    std::string msg = ("inline asm yields " + Twine(results.size()) +
-        " values but " + Twine(resultTypes.size()) + " expected").str();
-    inlineOp.erase();
-    return llvm::make_error<InlineRegionParseError>(msg, loc, std::nullopt);
+  if (!parsed.empty() && parsed.back().hasTrait<OpTrait::IsTerminator>()) {
+    auto yield = dyn_cast<YieldOp>(parsed.back());
+    if (!yield)
+      return failure("expected inline.yield terminator");
+    results.assign(yield.getResults().begin(), yield.getResults().end());
+    yield.erase();
   }
+  if (results.size() != resultTypes.size())
+    return failure(("inline asm yields " + Twine(results.size()) +
+                    " values but " + Twine(resultTypes.size()) + " expected").str());
 
-  auto newOpsBegin = std::next(Block::iterator(inlineOp));
+  Operation *firstNew = parsed.empty() ? nullptr : &parsed.front();
+  block->getOperations().splice(block->end(), parsed.getOperations());
 
-  // erase the InlineRegionOp
-  inlineOp.erase();
-
-  // optionally verify the new ops
   if (verifyAfterParse) {
-    auto verifyError = invokeAndCaptureFirstError(loc->getContext(), [&] {
-      return verifyOperationsAndSymbolUses(newOpsBegin, block->end());
-    });
-
-    if (verifyError)
-      return llvm::make_error<InlineRegionParseError>(*verifyError);
+    Block::iterator newOps = firstNew ? Block::iterator(firstNew) : block->end();
+    if (auto error = firstError(ctx, [&] {
+          return verifyOperationsAndSymbolUses(newOps, block->end());
+        }))
+      return failure(error->first);
   }
 
-  // success; return the results
   return results;
 }
-
 
 }

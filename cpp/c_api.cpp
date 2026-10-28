@@ -52,8 +52,10 @@ static void extractInlineParseErrorLocationAndMessage(
 
   llvm::handleAllErrors(std::move(err), [&](const InlineRegionParseError &e) {
     errorMessage = e.message;
-    if (auto loc = e.getLocation()) {
-      std::tie(line, col, byteOffset) = *loc;
+    if (e.position) {
+      line = e.position->line;
+      col = e.position->column;
+      byteOffset = e.position->byteOffset;
     }
   });
 
