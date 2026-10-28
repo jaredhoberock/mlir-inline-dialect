@@ -10,6 +10,15 @@ struct InlineValueList {
     values: *mut MlirValue,
 }
 
+#[repr(C)]
+struct InlineParseError {
+    message: *mut std::ffi::c_char,
+    has_position: bool,
+    line: usize,
+    column: usize,
+    byte_offset: usize,
+}
+
 #[link(name = "inline_dialect")]
 unsafe extern "C" {
     fn inlineRegisterDialect(ctx: MlirContext);
@@ -33,11 +42,7 @@ unsafe extern "C" {
         source_string: MlirStringRef,
         block: MlirBlock,
         verify_after_parse: bool,
-        error_line: *mut usize,
-        error_column: *mut usize,
-        error_byte_offset: *mut usize,
-        error_message: *mut std::ffi::c_char,
-        error_message_buffer_capcity: isize) -> InlineValueList;
+        error: *mut InlineParseError) -> InlineValueList;
 }
 
 pub fn register(context: &Context) {
@@ -108,12 +113,13 @@ pub fn parse_source_into_block<'c,'b>(
             .map(|ty| ty.to_raw())
             .collect();
 
-        // allocate a fixed-size error message buffer
-        const ERROR_MESSAGE_BUFFER_CAPACITY: usize = 1024;
-        let mut error_buf = [0 as std::ffi::c_char; ERROR_MESSAGE_BUFFER_CAPACITY];
-        let mut error_line: usize = 0;
-        let mut error_column: usize = 0;
-        let mut error_byte_offset: usize = usize::MAX;
+        let mut error = InlineParseError {
+            message: std::ptr::null_mut(),
+            has_position: false,
+            line: 0,
+            column: 0,
+            byte_offset: 0,
+        };
 
         let result = inlineParseSourceStringIntoBlock(
             loc.to_raw(),
@@ -128,26 +134,16 @@ pub fn parse_source_into_block<'c,'b>(
             src_str.to_raw(),
             block.to_raw(),
             verify_after_parse,
-            &mut error_line as *mut usize,
-            &mut error_column as *mut usize,
-            &mut error_byte_offset as *mut usize,
-            error_buf.as_mut_ptr(),
-            ERROR_MESSAGE_BUFFER_CAPACITY as isize,
+            &mut error,
         );
 
         if !result.succeeded {
-            let message = std::ffi::CStr::from_ptr(error_buf.as_ptr())
+            let message = std::ffi::CStr::from_ptr(error.message)
                 .to_string_lossy()
                 .into_owned();
-
-            // if we were unable to capture any part of the error location,
-            // we don't report any location at all
-            let line_col_byte_offset = if error_line == 0 || error_column == 0 || error_byte_offset == usize::MAX {
-                None
-            } else {
-                Some((error_line, error_column, error_byte_offset))
-            };
-
+            libc::free(error.message.cast());
+            let line_col_byte_offset = error.has_position
+                .then_some((error.line, error.column, error.byte_offset));
             return Err(Error { message, line_col_byte_offset });
         }
 

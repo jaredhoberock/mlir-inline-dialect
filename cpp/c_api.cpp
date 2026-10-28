@@ -2,12 +2,10 @@
 #include "Dialect.hpp"
 #include "Ops.hpp"
 #include "Parsing.hpp"
-#include <llvm/Support/SourceMgr.h>
 #include <mlir/CAPI/IR.h>
 #include <mlir/CAPI/Pass.h>
+#include <mlir/CAPI/Support.h>
 #include <mlir/IR/Builders.h>
-#include <mlir/IR/Verifier.h>
-#include <mlir/Parser/Parser.h>
 
 using namespace mlir;
 using namespace mlir::inline_;
@@ -38,117 +36,46 @@ MlirOperation inlineInlineRegionOpCreate(MlirLocation loc,
 }
 
 
-static void extractInlineParseErrorLocationAndMessage(
-    llvm::Error &&err,
-    size_t *errorLine,
-    size_t *errorCol,
-    size_t *errorByteOffset,
-    char *errorMessageBuffer,
-    intptr_t errorMessageBufferCapacity) {
-
-  std::string errorMessage;
-  size_t line = 0, col = 0;
-  size_t byteOffset = static_cast<size_t>(-1);  // sentinel for unknown offset
-
-  llvm::handleAllErrors(std::move(err), [&](const InlineRegionParseError &e) {
-    errorMessage = e.message;
-    if (e.position) {
-      line = e.position->line;
-      col = e.position->column;
-      byteOffset = e.position->byteOffset;
-    }
-  });
-
-  if (errorLine) *errorLine = line;
-  if (errorCol) *errorCol = col;
-  if (errorByteOffset) *errorByteOffset = byteOffset;
-
-  if (errorMessageBuffer && errorMessageBufferCapacity > 0) {
-    std::snprintf(errorMessageBuffer, errorMessageBufferCapacity,
-                  "%s", errorMessage.c_str());
-  }
-}
-
-
 InlineValueList inlineParseSourceStringIntoBlock(
-    MlirLocation wrappedLoc,
-    MlirStringRef* wrappedOperandNames,
-    MlirValue* wrappedOperands,
+    MlirLocation loc,
+    MlirStringRef* operandNames,
+    MlirValue* operands,
     intptr_t numOperands,
-    MlirStringRef* wrappedTypeAliasNames,
-    MlirType* wrappedTypeAliasTypes,
+    MlirStringRef* typeAliasNames,
+    MlirType* typeAliasTypes,
     intptr_t numTypeAliases,
-    MlirType* wrappedResultTypes,
+    MlirType* resultTypes,
     intptr_t numResultTypes,
-    MlirStringRef wrappedSourceString,
-    MlirBlock wrappedBlock,
+    MlirStringRef sourceString,
+    MlirBlock block,
     bool verifyAfterParse,
-    size_t* errorLine,
-    size_t* errorCol,
-    size_t* errorByteOffset,
-    char* errorMessageBuffer,
-    intptr_t errorMessageBufferCapacity) {
+    InlineParseError* error) {
+  SmallVector<StringRef> names, aliasNames;
+  SmallVector<Value> values;
+  SmallVector<Type> aliasTypes, types;
+  llvm::Expected<SmallVector<Value>> result = parseSourceStringIntoBlock(
+      unwrap(loc),
+      unwrapList(numOperands, operandNames, names),
+      unwrapList(numOperands, operands, values),
+      unwrapList(numTypeAliases, typeAliasNames, aliasNames),
+      unwrapList(numTypeAliases, typeAliasTypes, aliasTypes),
+      unwrapList(numResultTypes, resultTypes, types),
+      unwrap(sourceString), unwrap(block), verifyAfterParse);
 
-  InlineValueList out = {
-    .succeeded = false,
-    .count = 0,
-    .values = nullptr
-  };
-
-  Location loc = unwrap(wrappedLoc);
-  Block* block = unwrap(wrappedBlock);
-
-  // unwrap operands
-  SmallVector<StringRef,4> operandNames;
-  SmallVector<Value,4> operandValues;
-  for (intptr_t i = 0; i < numOperands; ++i) {
-    operandNames.push_back(StringRef(wrappedOperandNames[i].data, wrappedOperandNames[i].length));
-    operandValues.push_back(unwrap(wrappedOperands[i]));
-  }
-
-  // unwrap type aliases
-  SmallVector<StringRef,4> typeAliasNames;
-  SmallVector<Type,4> typeAliasTypes;
-  for (intptr_t i = 0; i < numTypeAliases; ++i) {
-    typeAliasNames.push_back(StringRef(wrappedTypeAliasNames[i].data, wrappedTypeAliasNames[i].length));
-    typeAliasTypes.push_back(unwrap(wrappedTypeAliasTypes[i]));
-  }
-
-  // wrap result types
-  SmallVector<Type,4> resultTypes;
-  for (intptr_t i = 0; i < numResultTypes; ++i) {
-    resultTypes.push_back(unwrap(wrappedResultTypes[i]));
-  }
-
-  StringRef sourceString = StringRef(wrappedSourceString.data, wrappedSourceString.length);
-
-  // call C++
-  llvm::Expected<SmallVector<Value>> result =
-    parseSourceStringIntoBlock(loc, operandNames, operandValues,
-                               typeAliasNames, typeAliasTypes,
-                               resultTypes, sourceString, block,
-                               verifyAfterParse);
-
-  // handle error case
   if (!result) {
-    extractInlineParseErrorLocationAndMessage(result.takeError(),
-                                              errorLine, errorCol, errorByteOffset,
-                                              errorMessageBuffer, errorMessageBufferCapacity);
-    return out;
+    llvm::handleAllErrors(result.takeError(), [&](const InlineRegionParseError &e) {
+      TextPosition position = e.position.value_or(TextPosition{0, 0, 0});
+      *error = {strdup(e.message.c_str()), e.position.has_value(),
+                position.line, position.column, position.byteOffset};
+    });
+    return {false, 0, nullptr};
   }
 
-  // success: wrap results into MlirValue[]
-  const SmallVector<Value> &values = *result;
-  out.succeeded = true;
-  out.count = static_cast<intptr_t>(values.size());
-  out.values = out.count > 0
-    ? static_cast<MlirValue*>(malloc(sizeof(MlirValue) * out.count))
-    : nullptr;
-
-  for (intptr_t i = 0; i < out.count; ++i)
-    out.values[i] = wrap(values[i]);
-
-  return out;
+  intptr_t count = result->size();
+  auto *wrapped = count ? static_cast<MlirValue*>(malloc(sizeof(MlirValue) * count)) : nullptr;
+  for (auto [i, value] : llvm::enumerate(*result))
+    wrapped[i] = wrap(value);
+  return {true, count, wrapped};
 }
 
 
