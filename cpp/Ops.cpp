@@ -2,8 +2,6 @@
 #include "Ops.hpp"
 #include <mlir/IR/Builders.h>
 #include <mlir/IR/IRMapping.h>
-#include <mlir/IR/Verifier.h>
-#include <mlir/Parser/Parser.h>
 
 #define GET_OP_CLASSES
 #include <Ops.cpp.inc>
@@ -168,76 +166,6 @@ void InlineRegionOp::build(OpBuilder &builder, OperationState &result,
   }
 
   bodyRegion->push_back(body);
-}
-
-LogicalResult InlineRegionOp::addParsedRegionBody(ArrayRef<StringRef> inputNames,
-                                                  StringRef regionStr) {
-  if (inputNames.size() != getInputs().size()) {
-    return emitOpError("number of input names does not match expected number of inputs");
-  }
-
-  MLIRContext *context = getContext();
-  Location loc = getLoc();
-
-  // create a prelude with placeholder values using the provided names
-  std::string prelude;
-  for (size_t i = 0; i < getInputs().size(); ++i) {
-    std::string valueName = inputNames[i].str();
-    std::string typeStr;
-    llvm::raw_string_ostream os(typeStr);
-    getInputs()[i].getType().print(os);
-
-    // create a placeholder with marker attribute
-    prelude += "%" + valueName + " = \"builtin.unrealized_conversion_cast\"() {inline_placeholder = " +
-      std::to_string(i) + "} : () -> " + typeStr + "\n";
-  }
-
-  // combine prelude with the original region string
-  std::string fullStr = prelude + regionStr.str();
-
-  // InlineRegionOp::build ensures this block exists
-  Block* block = &getRegion().front();
-
-  // parse the combined string into the block
-  // don't verify during parsing because YieldOp will complain about its parent
-  ParserConfig config(context, /*verifyAfterParse=*/false);
-  if (failed(parseSourceString(fullStr, block, config))) {
-    return emitOpError("Failed to parse region string");
-  }
-
-  // replace placeholder values with block arguments
-  SmallVector<Operation*> placeholderOps;
-  for (Operation &op : *block) {
-    if (auto attr = op.getAttrOfType<IntegerAttr>("inline_placeholder")) {
-      // extract the index
-      int index = attr.getInt();
-
-      // replace uses with the corresponding block argument
-      if (index >= 0 && index < getInputs().size()) {
-        op.getResult(0).replaceAllUsesWith(block->getArgument(index));
-      }
-
-      // mark for removal
-      placeholderOps.push_back(&op);
-    }
-  }
-
-  // remove the placeholder ops
-  for (Operation* op : placeholderOps) {
-    op->erase();
-  }
-
-  // ensure the block has a terminator
-  OpBuilder builder(context);
-  ensureTerminator(getRegion(), builder, loc);
-
-  // now verify all child operations once the region is complete
-  for (Operation &op : *block) {
-    if (failed(mlir::verify(&op)))
-      return op.emitError("verification failed after parsing");
-  }
-
-  return success();
 }
 
 /// Clones the body of an `inline.inline_region` operation using the provided builder.

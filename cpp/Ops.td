@@ -48,10 +48,6 @@ def InlineRegionOp : InlineOp<"inline_region", [
   ];
 
   let extraClassDeclaration = [{
-    mlir::LogicalResult addParsedRegionBody(llvm::ArrayRef<llvm::StringRef> inputNames,
-                                            llvm::StringRef regionStr);
-
-
     mlir::LogicalResult cloneBodyAtInsertionPoint(mlir::OpBuilder& builder,
                                                   mlir::ValueRange inputs,
                                                   llvm::SmallVectorImpl<Value> &yieldedValues,
