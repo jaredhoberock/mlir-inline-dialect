@@ -27,6 +27,15 @@ struct InlineValueList {
   MlirValue *values;
 };
 
+// Parses `sourceString`, MLIR text in which each operand name and type alias
+// name is bound, and appends its ops to `block`, yielding the text's yielded
+// values. `loc` is the position of the text's first character in the file the
+// text came from: each parsed op and block argument carries its position in
+// that file, the text's first line continuing `loc`'s line and each later line
+// starting at column 1 of a following line. A text whose ops were written with
+// explicit locations keeps them. On failure, `errorLine` and `errorCol` give
+// the error's position relative to the text (both from 1) and
+// `errorByteOffset` its byte offset into the text, when the parser reports one.
 InlineValueList inlineParseSourceStringIntoBlock(
     MlirLocation loc,
     MlirStringRef* operandNames,

@@ -79,6 +79,30 @@ static std::optional<size_t> findByteOffsetOfLoc(llvm::StringRef buffer, unsigne
 }
 
 
+// The name of the buffer the parser reads: the prelude's lines, then the
+// caller's text from the start of a line.
+static constexpr llvm::StringLiteral bufferName = "inline-text";
+
+// The position, in the coordinates `textStart` sets, of `parsed`, a position
+// in the parser's buffer. `textStart` is the position of the text's first
+// character: the text's first line continues that line, and each later text
+// line starts at column 1 of a following line, which holds when the text
+// appears verbatim, one line for each of its lines. A position inside the
+// prelude, or a `textStart` that is no file position, yields `textStart`.
+static Location positionOfParsedLoc(FileLineColLoc parsed, size_t preludeLines,
+                                    Location textStart) {
+  auto start = dyn_cast<FileLineColRange>(textStart);
+  if (!start || parsed.getLine() <= preludeLines)
+    return textStart;
+  unsigned textLine = parsed.getLine() - preludeLines;
+  unsigned column = textLine == 1
+      ? parsed.getColumn() + start.getStartColumn() - 1
+      : parsed.getColumn();
+  return FileLineColLoc::get(start.getFilename(),
+                             start.getStartLine() + textLine - 1, column);
+}
+
+
 static void adjustErrorLocationToAccountForPrelude(InlineRegionParseError &error,
                                                    MLIRContext* ctx,
                                                    StringRef fullSourceStr,
@@ -88,20 +112,15 @@ static void adjustErrorLocationToAccountForPrelude(InlineRegionParseError &error
     unsigned line = fileLoc.getLine();
     unsigned col = fileLoc.getColumn();
     auto byteOffset = findByteOffsetOfLoc(fullSourceStr, line, col);
-  
-    // adjust line, col, & byteOffset to account for the prelude
-    if (line > numPreludeLines) {
-      // location is within the user's code
-      unsigned adjustedLine = line - numPreludeLines;
-      error.loc = FileLineColLoc::get(ctx, fileLoc.getFilename(), adjustedLine, col);
-    } else {
-      // location is in the prelude, collapse to start of user region
-      error.loc = FileLineColLoc::get(ctx, fileLoc.getFilename(), 1, 1);
-      byteOffset = 0;
-    }
-  
+
+    // report the position relative to the text, whose first character is at
+    // line 1, column 1
+    error.loc = positionOfParsedLoc(
+        fileLoc, numPreludeLines,
+        FileLineColLoc::get(ctx, fileLoc.getFilename(), 1, 1));
+
     // adjust byte offset if it was found
-    if (byteOffset && *byteOffset >= numPreludeBytes) {
+    if (line > numPreludeLines && byteOffset && *byteOffset >= numPreludeBytes) {
       // location is within the user's code
       error.byteOffset = *byteOffset - numPreludeBytes;
     } else {
@@ -191,13 +210,25 @@ llvm::Expected<SmallVector<Value>> parseSourceStringIntoBlock(
   Block tempBlock;
   if (auto parseErr = invokeAndCaptureFirstError(ctx, [&] {
         ParserConfig cfg(ctx, /*verifyAfterParse=*/false);
-        return parseSourceString(fullSource, &tempBlock, cfg);
+        return parseSourceString(fullSource, &tempBlock, cfg, bufferName);
       })) {
     // remap diagnostics to the user string to account for the prelude
     adjustErrorLocationToAccountForPrelude(*parseErr, ctx, fullSource,
                                            preludeLines, prelude.size());
     return llvm::make_error<InlineRegionParseError>(*parseErr);
   }
+
+  // every op and block argument the parser placed in its buffer takes its
+  // position in the caller's file
+  AttrTypeReplacer relocator;
+  relocator.addReplacement([&, preludeLines = preludeLines](FileLineColLoc parsed) -> std::optional<Attribute> {
+    if (parsed.getFilename() != bufferName)
+      return std::nullopt;
+    return positionOfParsedLoc(parsed, preludeLines, loc);
+  });
+  for (Operation &op : tempBlock)
+    relocator.recursivelyReplaceElementsIn(&op, /*replaceAttrs=*/false,
+                                           /*replaceLocs=*/true);
 
   // collect UCC placeholders
   SmallVector<Value> placeholderValues(operands.size(), Value());
